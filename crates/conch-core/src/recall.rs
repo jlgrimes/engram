@@ -19,14 +19,29 @@ pub struct RecallResult {
     pub score: f64,
 }
 
+/// Global decay constants (lambda/day) by memory kind.
+///
+/// These are intentionally code-level policy constants (not stored per-memory),
+/// so tuning affects all memories immediately.
+const FACT_DECAY_LAMBDA_PER_DAY: f64 = 0.02;
+const EPISODE_DECAY_LAMBDA_PER_DAY: f64 = 0.06;
+
+/// Reinforcement boost applied when a memory is touched.
+const FACT_TOUCH_BOOST: f64 = 0.10;
+const EPISODE_TOUCH_BOOST: f64 = 0.20;
+
+/// Overfetch multiplier for candidate reranking.
+const CANDIDATE_MULTIPLIER: usize = 10;
+const MIN_CANDIDATES: usize = 50;
+
 /// Hybrid recall: BM25 + vector search fused via Reciprocal Rank Fusion.
 ///
 /// 1. BM25 search (keyword relevance)
 /// 2. Vector search (semantic relevance, cosine sim > 0.3)
 /// 3. RRF fusion of both rankings
-/// 4. Final score = RRF × strength × recency
+/// 4. Final score = RRF × decayed_strength
 ///
-/// Recalled memories are "touched" (strength reinforced, access count bumped).
+/// Recalled memories are "touched" (decay is applied, then reinforced, and access count bumped).
 pub fn recall(
     store: &MemoryStore,
     query: &str,
@@ -53,16 +68,19 @@ pub fn recall(
     // RRF fusion
     let fused = rrf(&bm25_ranked, &vector_ranked);
 
-    // Score = RRF × strength × recency
-    let mut results: Vec<RecallResult> = fused
-        .into_iter()
+    // Overfetch candidates, then rerank with full score (including decay)
+    // to avoid top-K cutoff errors when decay changes ordering.
+    let candidate_count = (limit.saturating_mul(CANDIDATE_MULTIPLIER)).max(MIN_CANDIDATES);
+    let candidates = fused.into_iter().take(candidate_count);
+
+    // Score = RRF × decayed_strength
+    let mut results: Vec<RecallResult> = candidates
         .map(|(idx, rrf_score)| {
             let mem = &all_memories[idx].0;
-            let hours = (now - mem.last_accessed_at).num_minutes() as f64 / 60.0;
-            let recency = (-0.01 * hours.max(0.0)).exp();
+            let decayed_strength = effective_strength(mem, now);
             RecallResult {
                 memory: mem.clone(),
-                score: rrf_score * mem.strength * recency,
+                score: rrf_score * decayed_strength,
             }
         })
         .collect();
@@ -70,12 +88,38 @@ pub fn recall(
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(limit);
 
-    // Touch recalled memories (reinforce strength)
+    // Touch recalled memories: apply decay first, then reinforce.
     for result in &results {
-        store.touch_memory(result.memory.id).map_err(RecallError::Db)?;
+        let mem = &result.memory;
+        let decayed = effective_strength(mem, now);
+        let boosted = (decayed + touch_boost(mem)).min(1.0);
+        store
+            .touch_memory_with_strength(mem.id, boosted, now)
+            .map_err(RecallError::Db)?;
     }
 
     Ok(results)
+}
+
+fn kind_decay_lambda_per_day(mem: &MemoryRecord) -> f64 {
+    match &mem.kind {
+        MemoryKind::Fact(_) => FACT_DECAY_LAMBDA_PER_DAY,
+        MemoryKind::Episode(_) => EPISODE_DECAY_LAMBDA_PER_DAY,
+    }
+}
+
+fn touch_boost(mem: &MemoryRecord) -> f64 {
+    match &mem.kind {
+        MemoryKind::Fact(_) => FACT_TOUCH_BOOST,
+        MemoryKind::Episode(_) => EPISODE_TOUCH_BOOST,
+    }
+}
+
+fn effective_strength(mem: &MemoryRecord, now: chrono::DateTime<Utc>) -> f64 {
+    let elapsed_secs = (now - mem.last_accessed_at).num_seconds().max(0) as f64;
+    let elapsed_days = elapsed_secs / 86_400.0;
+    let lambda = kind_decay_lambda_per_day(mem);
+    (mem.strength * (-lambda * elapsed_days).exp()).clamp(0.0, 1.0)
 }
 
 fn bm25_search(query: &str, memories: &[(MemoryRecord, String)]) -> Vec<(usize, f32)> {
@@ -147,5 +191,84 @@ pub enum RecallError {
 impl From<rusqlite::Error> for RecallError {
     fn from(e: rusqlite::Error) -> Self {
         RecallError::Db(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::{EmbedError, Embedding};
+
+    struct MockEmbedder;
+
+    impl Embedder for MockEmbedder {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Embedding>, EmbedError> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if t.contains("alpha") {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect())
+        }
+
+        fn dimension(&self) -> usize {
+            2
+        }
+    }
+
+    #[test]
+    fn effective_strength_decays_by_kind() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let fact_id = store.remember_fact("Jared", "builds", "Gen", Some(&[1.0, 0.0])).unwrap();
+        let ep_id = store
+            .remember_episode("alpha project context", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        let old_time = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET last_accessed_at = ?1 WHERE id IN (?2, ?3)",
+                rusqlite::params![old_time, fact_id, ep_id],
+            )
+            .unwrap();
+
+        let fact = store.get_memory(fact_id).unwrap().unwrap();
+        let episode = store.get_memory(ep_id).unwrap().unwrap();
+
+        let sf = effective_strength(&fact, Utc::now());
+        let se = effective_strength(&episode, Utc::now());
+        assert!(sf > se, "facts should decay slower than episodes");
+    }
+
+    #[test]
+    fn recall_touch_applies_decay_then_reinforcement() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let id = store
+            .remember_episode("alpha memory to recall", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        let old_time = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET strength = 1.0, last_accessed_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_time, id],
+            )
+            .unwrap();
+
+        let results = recall(&store, "alpha", &MockEmbedder, 1).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let after = store.get_memory(id).unwrap().unwrap();
+        assert!(after.access_count >= 1);
+        // Should have decayed meaningfully from 1.0 before reinforcement.
+        assert!(after.strength < 1.0);
+        // But reinforcement should keep it above a tiny decayed floor.
+        assert!(after.strength > 0.2);
     }
 }

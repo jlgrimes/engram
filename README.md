@@ -28,8 +28,8 @@ Agent → conch recall "where does Jared work?"
 - **Facts** — subject-relation-object triples
 - **Episodes** — free-text events
 - **Embeddings** — local FastEmbed (no API key needed)
-- **Recall** — BM25 + vector search, fused via RRF, weighted by strength × recency
-- **Decay** — memories fade over time; recalled memories get stronger
+- **Recall** — BM25 + vector search, fused via RRF, reranked by decayed strength
+- **Decay** — lazy compute-time decay (kind-specific constants), then reinforce on touch
 
 ## Quick start (new user)
 
@@ -72,22 +72,6 @@ Defaults:
 - filters by an importance score (preferences, decisions, todos, problems, project context)
 - dedupes exact repeated messages
 
-## Import from OpenClaw/ChatGPT conversations JSON
-
-If you have a big `conversations.json` export, bulk-import it as episodes:
-
-```bash
-python3 scripts/import-openclaw-conversations.py \
-  --input ~/conversations.json \
-  --db ~/.conch/default.db \
-  --prefix-title
-
-# then generate embeddings in batch
-conch embed
-```
-
-Default imports only **user** messages (cleaner memory). Add `--include-assistant` if you want both sides.
-
 ## Commands
 
 ```
@@ -97,7 +81,7 @@ conch recall <query> [--limit N]               # semantic search
 conch forget --id <id>                          # delete by ID
 conch forget --subject <name>                   # delete by subject
 conch forget --older-than <duration>            # prune old (e.g. 30d)
-conch decay                                     # fade old memories
+conch decay                                     # maintenance pass
 conch stats                                     # check health
 conch embed                                     # generate missing embeddings
 conch export                                    # JSON to stdout
@@ -107,13 +91,14 @@ conch import                                    # JSON from stdin
 ## Scoring
 
 ```
-score = RRF(BM25_rank, vector_rank) × strength × recency
+score = RRF(BM25_rank, vector_rank) × effective_strength
+effective_strength = base_strength × exp(-lambda(kind) × elapsed_days)
 ```
 
 - **BM25** — keyword relevance
 - **Vector** — semantic similarity (384-dim FastEmbed)
-- **Strength** — reinforced on recall (+0.2, max 1.0), decays over time
-- **Recency** — exponential decay based on last access time
+- **effective_strength** — computed at query time from global kind constants
+- **Touch** — on recall, decay is applied first, then reinforcement boost is added
 
 ## Storage
 

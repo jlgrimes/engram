@@ -98,11 +98,10 @@ impl MemoryStore {
         rows.collect()
     }
 
-    pub fn touch_memory(&self, id: i64) -> SqlResult<()> {
-        let now = Utc::now().to_rfc3339();
+    pub fn touch_memory_with_strength(&self, id: i64, strength: f64, now: DateTime<Utc>) -> SqlResult<()> {
         self.conn.execute(
-            "UPDATE memories SET last_accessed_at = ?1, access_count = access_count + 1, strength = MIN(strength + 0.2, 1.0) WHERE id = ?2",
-            params![now, id],
+            "UPDATE memories SET last_accessed_at = ?1, access_count = access_count + 1, strength = ?2 WHERE id = ?3",
+            params![now.to_rfc3339(), strength.clamp(0.0, 1.0), id],
         )?;
         Ok(())
     }

@@ -1,0 +1,22 @@
+[package]
+name = "conch-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server for conch — biological memory for AI agents"
+license = "MIT"
+
+[[bin]]
+name = "conch-mcp"
+path = "src/main.rs"
+
+[dependencies]
+conch-core = { path = "../conch-core" }
+rmcp = { version = "0.15", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"

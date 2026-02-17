@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["crates/conch-core", "crates/conch-cli", "crates/conch-mcp"]

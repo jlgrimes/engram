@@ -1,0 +1,19 @@
+# Task Board
+
+⭕ **main** - Finish conch for release. Three parallel tasks:
+
+AGENT 1 — MCP Server:
+Build crates/conch-mcp/ — a Model Context Protocol server for conch. Reference the old implementation at ~/projects/engram/crates/engram-mcp/src/main.rs for the pattern. Use the rmcp crate (check crates.io for latest). Expose tools: remember_fact, remember_episode, recall, relate, forget, decay, stats. Add it to the workspace Cargo.toml. Must compile and have basic tests.
+
+AGENT 2 — Batch embed + Export/Import:
+1. Add a 'conch embed' CLI command that scans all memories missing embeddings and generates them (batch embed on demand).
+2. Add 'conch export' (dumps all memories + associations as JSON to stdout) and 'conch import' (reads JSON from stdin, inserts into db). Add the necessary store methods.
+3. Add tests for all new functionality.
+
+AGENT 3 — Update OpenClaw skill + README:
+1. Update the skill at ~/.openclaw/workspace/skills/conch/SKILL.md to match current CLI commands and features (hybrid search, MCP, export/import, embed).
+2. Write a proper README.md for this repo (like grotto — agent-first, OpenClaw focused, with install instructions).
+3. Create a CLAUDE.md documenting the codebase architecture for future agents.
+
+All work happens in this repo (~/projects/conch). Run 'cargo test' before considering your task done. Coordinate via 'grotto status' and 'grotto steer'.
+

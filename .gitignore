@@ -1,0 +1,6 @@
+target/
+.fastembed_cache/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal

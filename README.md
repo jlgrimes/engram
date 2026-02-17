@@ -31,6 +31,32 @@ Agent → conch recall "where does Jared work?"
 - **Recall** — BM25 + vector search, fused via RRF, weighted by strength × recency
 - **Decay** — memories fade over time; recalled memories get stronger
 
+## Quick start (new user)
+
+```bash
+# 1) Add your first memory
+conch remember "Jared" "builds" "Gen"
+
+# 2) Recall it
+conch recall "what does Jared build"
+
+# 3) Check DB health
+conch stats
+```
+
+## Import / export memories
+
+```bash
+# Export
+conch export > backup.json
+
+# Import
+conch import < backup.json
+
+# Or use helper script
+bash scripts/import-memories.sh backup.json
+```
+
 ## Commands
 
 ```

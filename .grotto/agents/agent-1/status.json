@@ -1,8 +1,8 @@
 {
   "id": "agent-1",
   "pane_index": 0,
-  "state": "failed",
+  "state": "spawning",
   "current_task": null,
-  "progress": "startup_failed",
-  "last_update": "2026-02-17T22:27:26.603041422Z"
+  "progress": "Starting up...",
+  "last_update": "2026-02-18T16:13:05.192456805Z"
 }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub type Embedding = Vec<f32>;
 
@@ -24,7 +24,7 @@ pub enum EmbedError {
 }
 
 pub struct FastEmbedder {
-    model: fastembed::TextEmbedding,
+    model: Mutex<fastembed::TextEmbedding>,
     dimension: usize,
 }
 
@@ -32,9 +32,8 @@ impl FastEmbedder {
     pub fn new() -> Result<Self, EmbedError> {
         let model = fastembed::TextEmbedding::try_new(Default::default())
             .map_err(|e| EmbedError::Model(e.to_string()))?;
-        // Default model (AllMiniLML6V2) has 384 dimensions
         Ok(Self {
-            model,
+            model: Mutex::new(model),
             dimension: 384,
         })
     }
@@ -44,6 +43,8 @@ impl Embedder for FastEmbedder {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Embedding>, EmbedError> {
         let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
         self.model
+            .lock()
+            .map_err(|e| EmbedError::Other(e.to_string()))?
             .embed(owned, None)
             .map_err(|e| EmbedError::Model(e.to_string()))
     }

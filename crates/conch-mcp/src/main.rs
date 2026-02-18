@@ -15,17 +15,35 @@ struct RememberFactParams {
     subject: String,
     relation: String,
     object: String,
+    /// Optional comma-separated tags (e.g. "preference,technical")
+    tags: Option<String>,
+    /// Source of this memory (e.g. "mcp", "discord", "cron")
+    source: Option<String>,
+    /// Session identifier for grouping related memories
+    session_id: Option<String>,
+    /// Channel or context within the source
+    channel: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RememberEpisodeParams {
     text: String,
+    /// Optional comma-separated tags (e.g. "decision,project")
+    tags: Option<String>,
+    /// Source of this memory (e.g. "mcp", "discord", "cron")
+    source: Option<String>,
+    /// Session identifier for grouping related memories
+    session_id: Option<String>,
+    /// Channel or context within the source
+    channel: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RecallParams {
     query: String,
     limit: Option<usize>,
+    /// Optional tag to filter results by
+    tag: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -44,6 +62,14 @@ struct MemoryResponse {
     created_at: String,
     last_accessed_at: String,
     access_count: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<String>,
 }
 
 impl From<RecallResult> for MemoryResponse {
@@ -60,7 +86,18 @@ impl From<RecallResult> for MemoryResponse {
             created_at: r.memory.created_at.to_rfc3339(),
             last_accessed_at: r.memory.last_accessed_at.to_rfc3339(),
             access_count: r.memory.access_count,
+            tags: r.memory.tags.clone(),
+            source: r.memory.source.clone(),
+            session_id: r.memory.session_id.clone(),
+            channel: r.memory.channel.clone(),
         }
+    }
+}
+
+fn parse_tags_mcp(tags: Option<&str>) -> Vec<String> {
+    match tags {
+        Some(s) if !s.is_empty() => s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+        _ => vec![],
     }
 }
 
@@ -76,35 +113,47 @@ impl ConchServer {
         Self { conch: Arc::new(Mutex::new(conch)), tool_router: Self::tool_router() }
     }
 
-    #[tool(name = "remember_fact", description = "Store a fact as a subject-relation-object triple.")]
+    #[tool(name = "remember_fact", description = "Store a fact as a subject-relation-object triple. Uses upsert: if a fact with the same subject+relation exists, its object is updated. Optionally tag with comma-separated categories.")]
     async fn remember_fact(&self, params: Parameters<RememberFactParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        let tags = parse_tags_mcp(p.tags.as_deref());
+        let source = Some(p.source.as_deref().unwrap_or("mcp"));
         let conch = self.conch.lock().unwrap();
-        match conch.remember_fact(&p.subject, &p.relation, &p.object) {
-            Ok(mem) => Ok(CallToolResult::success(vec![Content::text(
-                serde_json::json!({ "id": mem.id, "strength": mem.strength }).to_string(),
-            )])),
+        match conch.remember_fact_dedup_full(&p.subject, &p.relation, &p.object, &tags, source, p.session_id.as_deref(), p.channel.as_deref()) {
+            Ok(result) => {
+                let mem = result.memory();
+                let action = match &result {
+                    conch_core::RememberResult::Created(_) => "created",
+                    conch_core::RememberResult::Updated(_) => "updated",
+                    conch_core::RememberResult::Duplicate { .. } => "duplicate",
+                };
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::json!({ "id": mem.id, "action": action, "strength": mem.strength, "tags": mem.tags, "source": mem.source }).to_string(),
+                )]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }
 
-    #[tool(name = "remember_episode", description = "Store a free-text episode or event.")]
+    #[tool(name = "remember_episode", description = "Store a free-text episode or event. Optionally tag with comma-separated categories and track source.")]
     async fn remember_episode(&self, params: Parameters<RememberEpisodeParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        let tags = parse_tags_mcp(p.tags.as_deref());
+        let source = Some(p.source.as_deref().unwrap_or("mcp"));
         let conch = self.conch.lock().unwrap();
-        match conch.remember_episode(&p.text) {
+        match conch.remember_episode_full(&p.text, &tags, source, p.session_id.as_deref(), p.channel.as_deref()) {
             Ok(mem) => Ok(CallToolResult::success(vec![Content::text(
-                serde_json::json!({ "id": mem.id, "strength": mem.strength }).to_string(),
+                serde_json::json!({ "id": mem.id, "strength": mem.strength, "tags": mem.tags, "source": mem.source }).to_string(),
             )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }
 
-    #[tool(name = "recall", description = "Search memories using natural language. BM25 + vector search, ranked by relevance × strength × recency.")]
+    #[tool(name = "recall", description = "Search memories using natural language. BM25 + vector search, ranked by relevance × strength × recency. Optionally filter by tag.")]
     async fn recall(&self, params: Parameters<RecallParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let conch = self.conch.lock().unwrap();
-        match conch.recall(&p.query, p.limit.unwrap_or(5)) {
+        match conch.recall_with_tag(&p.query, p.limit.unwrap_or(5), p.tag.as_deref()) {
             Ok(results) => {
                 let responses: Vec<MemoryResponse> = results.into_iter().map(MemoryResponse::from).collect();
                 Ok(CallToolResult::success(vec![Content::text(

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use conch_core::{ConchDB, memory::MemoryKind};
+use conch_core::{ConchDB, memory::{MemoryKind, RememberResult}};
 use std::io;
 
 #[derive(Parser)]
@@ -22,16 +22,43 @@ enum Command {
         subject: String,
         relation: String,
         object: String,
+        /// Comma-separated tags (e.g. "preference,technical")
+        #[arg(long)]
+        tags: Option<String>,
+        /// Source of this memory (e.g. "cli", "discord", "cron"). Defaults to "cli".
+        #[arg(long)]
+        source: Option<String>,
+        /// Session identifier for grouping related memories
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Channel or context within the source
+        #[arg(long)]
+        channel: Option<String>,
     },
     /// Store an episode (free-text event)
     RememberEpisode {
         text: String,
+        /// Comma-separated tags (e.g. "decision,project")
+        #[arg(long)]
+        tags: Option<String>,
+        /// Source of this memory (e.g. "cli", "discord", "cron"). Defaults to "cli".
+        #[arg(long)]
+        source: Option<String>,
+        /// Session identifier for grouping related memories
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Channel or context within the source
+        #[arg(long)]
+        channel: Option<String>,
     },
     /// Semantic search for memories
     Recall {
         query: String,
         #[arg(long, default_value_t = 5)]
         limit: usize,
+        /// Filter results to only memories with this tag
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Delete memories
     Forget {
@@ -74,6 +101,13 @@ fn parse_duration_secs(s: &str) -> Result<i64, String> {
     }
 }
 
+fn parse_tags(tags: Option<&str>) -> Vec<String> {
+    match tags {
+        Some(s) if !s.is_empty() => s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+        _ => vec![],
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Some(parent) = std::path::Path::new(&cli.db).parent() {
@@ -91,26 +125,51 @@ fn main() {
 
 fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
     match &cli.command {
-        Command::Remember { subject, relation, object } => {
-            let record = db.remember_fact(subject, relation, object)?;
-            if cli.json { println!("{}", serde_json::to_string_pretty(&record)?); }
-            else if !cli.quiet { println!("Remembered: {subject} {relation} {object}"); }
+        Command::Remember { subject, relation, object, tags, source, session_id, channel } => {
+            let tag_list = parse_tags(tags.as_deref());
+            let src = Some(source.as_deref().unwrap_or("cli"));
+            let result = db.remember_fact_dedup_full(subject, relation, object, &tag_list, src, session_id.as_deref(), channel.as_deref())?;
+            if cli.json { println!("{}", serde_json::to_string_pretty(&result)?); }
+            else if !cli.quiet {
+                let tag_suffix = if tag_list.is_empty() { String::new() } else { format!(" [{}]", tag_list.join(", ")) };
+                match &result {
+                    RememberResult::Created(_) => println!("Remembered: {subject} {relation} {object}{tag_suffix}"),
+                    RememberResult::Updated(mem) => {
+                        println!("Updated existing fact (id: {}): {subject} {relation} {object}{tag_suffix}", mem.id);
+                    }
+                    RememberResult::Duplicate { existing, similarity } => {
+                        println!("Duplicate detected (similarity: {similarity:.3}), reinforced existing memory (id: {}, strength: {:.2})", existing.id, existing.strength);
+                    }
+                }
+            }
         }
-        Command::RememberEpisode { text } => {
-            let record = db.remember_episode(text)?;
-            if cli.json { println!("{}", serde_json::to_string_pretty(&record)?); }
-            else if !cli.quiet { println!("Remembered episode: {text}"); }
+        Command::RememberEpisode { text, tags, source, session_id, channel } => {
+            let tag_list = parse_tags(tags.as_deref());
+            let src = Some(source.as_deref().unwrap_or("cli"));
+            let result = db.remember_episode_dedup_full(text, &tag_list, src, session_id.as_deref(), channel.as_deref())?;
+            if cli.json { println!("{}", serde_json::to_string_pretty(&result)?); }
+            else if !cli.quiet {
+                let tag_suffix = if tag_list.is_empty() { String::new() } else { format!(" [{}]", tag_list.join(", ")) };
+                match &result {
+                    RememberResult::Created(_) => println!("Remembered episode: {text}{tag_suffix}"),
+                    RememberResult::Updated(mem) => println!("Updated existing memory (id: {}){tag_suffix}", mem.id),
+                    RememberResult::Duplicate { existing, similarity } => {
+                        println!("Duplicate detected (similarity: {similarity:.3}), reinforced existing memory (id: {}, strength: {:.2})", existing.id, existing.strength);
+                    }
+                }
+            }
         }
-        Command::Recall { query, limit } => {
-            let results = db.recall(query, *limit)?;
+        Command::Recall { query, limit, tag } => {
+            let results = db.recall_with_tag(query, *limit, tag.as_deref())?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else if !cli.quiet {
                 if results.is_empty() { println!("No memories found."); }
                 for r in &results {
+                    let tag_suffix = if r.memory.tags.is_empty() { String::new() } else { format!(" [{}]", r.memory.tags.join(", ")) };
                     match &r.memory.kind {
-                        MemoryKind::Fact(f) => println!("[fact] {} {} {} (str: {:.2}, score: {:.3})", f.subject, f.relation, f.object, r.memory.strength, r.score),
-                        MemoryKind::Episode(e) => println!("[episode] {} (str: {:.2}, score: {:.3})", e.text, r.memory.strength, r.score),
+                        MemoryKind::Fact(f) => println!("[fact] {} {} {} (str: {:.2}, score: {:.3}){tag_suffix}", f.subject, f.relation, f.object, r.memory.strength, r.score),
+                        MemoryKind::Episode(e) => println!("[episode] {} (str: {:.2}, score: {:.3}){tag_suffix}", e.text, r.memory.strength, r.score),
                     }
                 }
             }

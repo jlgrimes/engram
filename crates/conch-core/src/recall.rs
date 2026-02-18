@@ -63,7 +63,27 @@ pub fn recall(
     embedder: &dyn Embedder,
     limit: usize,
 ) -> Result<Vec<RecallResult>, RecallError> {
-    let all_memories = store.all_memories_with_text().map_err(RecallError::Db)?;
+    recall_with_tag_filter(store, query, embedder, limit, None)
+}
+
+/// Like `recall`, but optionally filters results to only include memories
+/// that have a specific tag.
+pub fn recall_with_tag_filter(
+    store: &MemoryStore,
+    query: &str,
+    embedder: &dyn Embedder,
+    limit: usize,
+    tag_filter: Option<&str>,
+) -> Result<Vec<RecallResult>, RecallError> {
+    let mut all_memories = store.all_memories_with_text().map_err(RecallError::Db)?;
+
+    // If a tag filter is specified, only keep memories that have the tag.
+    if let Some(tag) = tag_filter {
+        let tag_lower = tag.to_lowercase();
+        all_memories.retain(|(mem, _)| {
+            mem.tags.iter().any(|t| t.to_lowercase() == tag_lower)
+        });
+    }
 
     if all_memories.is_empty() {
         return Ok(vec![]);
@@ -698,6 +718,10 @@ mod tests {
             last_accessed_at: Utc::now(),
             access_count: 0,
             embedding: None,
+            tags: vec![],
+            source: None,
+            session_id: None,
+            channel: None,
         }
     }
 
@@ -712,6 +736,10 @@ mod tests {
             last_accessed_at: time,
             access_count: 0,
             embedding: None,
+            tags: vec![],
+            source: None,
+            session_id: None,
+            channel: None,
         }
     }
 
@@ -742,5 +770,50 @@ mod tests {
         assert!(after.strength < 1.0);
         // But reinforcement should keep it above a tiny decayed floor.
         assert!(after.strength > 0.2);
+    }
+
+    // ── Tag filter tests ────────────────────────────────────
+
+    #[test]
+    fn recall_with_tag_filter_returns_only_tagged_memories() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        // Create two memories: one tagged, one not
+        store.remember_fact_with_tags("Jared", "likes", "alpha", Some(&[1.0, 0.0]), &["preference".to_string()]).unwrap();
+        store.remember_fact_with_tags("Jared", "uses", "alpha", Some(&[1.0, 0.0]), &["technical".to_string()]).unwrap();
+        store.remember_fact("weather", "is", "alpha", Some(&[1.0, 0.0])).unwrap();
+
+        // Without filter: should find all 3
+        let all_results = recall(&store, "alpha", &MockEmbedder, 10).unwrap();
+        assert_eq!(all_results.len(), 3);
+
+        // With "preference" filter: should find only 1
+        let filtered = recall_with_tag_filter(&store, "alpha", &MockEmbedder, 10, Some("preference")).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].memory.tags, vec!["preference"]);
+
+        // With "technical" filter: should find only 1
+        let filtered = recall_with_tag_filter(&store, "alpha", &MockEmbedder, 10, Some("technical")).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].memory.tags, vec!["technical"]);
+    }
+
+    #[test]
+    fn recall_with_tag_filter_is_case_insensitive() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact_with_tags("Jared", "likes", "alpha", Some(&[1.0, 0.0]), &["Preference".to_string()]).unwrap();
+
+        let results = recall_with_tag_filter(&store, "alpha", &MockEmbedder, 10, Some("preference")).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn recall_with_no_tag_filter_returns_all() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact_with_tags("Jared", "likes", "alpha", Some(&[1.0, 0.0]), &["preference".to_string()]).unwrap();
+        store.remember_fact("weather", "is", "alpha", Some(&[1.0, 0.0])).unwrap();
+
+        let results = recall_with_tag_filter(&store, "alpha", &MockEmbedder, 10, None).unwrap();
+        assert_eq!(results.len(), 2);
     }
 }

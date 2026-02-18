@@ -74,16 +74,6 @@ impl MemoryStore {
 
     // ── Recall ───────────────────────────────────────────────
 
-    pub fn all_memories_with_embeddings(&self) -> SqlResult<Vec<MemoryRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, kind, subject, relation, object, episode_text,
-                    strength, embedding, created_at, last_accessed_at, access_count
-             FROM memories WHERE strength > 0.01",
-        )?;
-        let rows = stmt.query_map([], |row| row_to_memory(row))?;
-        rows.collect()
-    }
-
     pub fn all_memories_with_text(&self) -> SqlResult<Vec<(MemoryRecord, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, subject, relation, object, episode_text,
@@ -112,7 +102,7 @@ impl MemoryStore {
                     strength, embedding, created_at, last_accessed_at, access_count
              FROM memories WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![id], |row| row_to_memory(row))?;
+        let mut rows = stmt.query_map(params![id], row_to_memory)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
@@ -148,21 +138,17 @@ impl MemoryStore {
     // ── Forget ───────────────────────────────────────────────
 
     pub fn forget_by_subject(&self, subject: &str) -> SqlResult<usize> {
-        Ok(self.conn.execute("DELETE FROM memories WHERE subject = ?1", params![subject])?)
+        self.conn.execute("DELETE FROM memories WHERE subject = ?1", params![subject])
     }
 
     pub fn forget_by_id(&self, id: &str) -> SqlResult<usize> {
-        // Try memories table first, then legacy facts/episodes tables
-        let mut changed = self.conn.execute("DELETE FROM memories WHERE id = ?1", params![id]).unwrap_or(0);
-        // Legacy tables (from old schema)
-        changed += self.conn.execute("UPDATE facts SET forgotten = 1 WHERE id = ?1 AND forgotten = 0", params![id]).unwrap_or(0);
-        changed += self.conn.execute("UPDATE episodes SET forgotten = 1 WHERE id = ?1 AND forgotten = 0", params![id]).unwrap_or(0);
+        let changed = self.conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
         Ok(changed)
     }
 
     pub fn forget_older_than(&self, duration: Duration) -> SqlResult<usize> {
         let cutoff = (Utc::now() - duration).to_rfc3339();
-        Ok(self.conn.execute("DELETE FROM memories WHERE created_at < ?1", params![cutoff])?)
+        self.conn.execute("DELETE FROM memories WHERE created_at < ?1", params![cutoff])
     }
 
     // ── Embed ────────────────────────────────────────────────
@@ -173,7 +159,7 @@ impl MemoryStore {
                     strength, embedding, created_at, last_accessed_at, access_count
              FROM memories WHERE embedding IS NULL",
         )?;
-        let rows = stmt.query_map([], |row| row_to_memory(row))?;
+        let rows = stmt.query_map([], row_to_memory)?;
         rows.collect()
     }
 
@@ -190,10 +176,11 @@ impl MemoryStore {
                     strength, embedding, created_at, last_accessed_at, access_count
              FROM memories",
         )?;
-        let rows = stmt.query_map([], |row| row_to_memory(row))?;
+        let rows = stmt.query_map([], row_to_memory)?;
         rows.collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn import_fact(&self, subject: &str, relation: &str, object: &str, strength: f64, embedding: Option<&[f32]>, created_at: &str, last_accessed_at: &str, access_count: i64) -> SqlResult<i64> {
         let emb_blob = embedding.map(embedding_to_blob);
         self.conn.execute(

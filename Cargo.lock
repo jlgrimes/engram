@@ -477,7 +477,6 @@ dependencies = [
 name = "conch-mcp"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "conch-core",
  "rmcp",
  "schemars",

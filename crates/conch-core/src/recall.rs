@@ -392,6 +392,331 @@ mod tests {
         assert!(sf > se, "facts should decay slower than episodes");
     }
 
+    // ── Recency boost tests ────────────────────────────────────
+
+    #[test]
+    fn recency_boost_favors_recent_over_old() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let now = Utc::now();
+
+        // Two semantically identical memories, different ages
+        let recent_id = store
+            .remember_episode("alpha project is great", Some(&[1.0, 0.0]))
+            .unwrap();
+        let old_id = store
+            .remember_episode("alpha project is great", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        // Make the old one 30 days old
+        let old_time = (now - chrono::Duration::days(30)).to_rfc3339();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET created_at = ?1, last_accessed_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_time, old_id],
+            )
+            .unwrap();
+
+        let results = recall(&store, "alpha project", &MockEmbedder, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        // Recent memory should score higher
+        assert_eq!(results[0].memory.id, recent_id);
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn recency_boost_has_floor_old_memories_still_appear() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let now = Utc::now();
+
+        // Very old memory — should still appear, not be zeroed out
+        let id = store
+            .remember_episode("alpha ancient knowledge", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        let ancient_time = (now - chrono::Duration::days(365)).to_rfc3339();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET created_at = ?1, last_accessed_at = ?1 WHERE id = ?2",
+                rusqlite::params![ancient_time, id],
+            )
+            .unwrap();
+
+        let mem = store.get_memory(id).unwrap().unwrap();
+        let boost = recency_boost(&mem, now);
+        assert!(boost >= RECENCY_FLOOR, "recency boost {} should be >= floor {}", boost, RECENCY_FLOOR);
+    }
+
+    // ── Access weight tests ──────────────────────────────────
+
+    #[test]
+    fn access_weight_boosts_frequently_recalled_memories() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        // Two identical memories, one recalled many times
+        let hot_id = store
+            .remember_episode("alpha hot memory", Some(&[1.0, 0.0]))
+            .unwrap();
+        let cold_id = store
+            .remember_episode("alpha cold memory", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        // Bump access count on hot memory
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET access_count = 20 WHERE id = ?1",
+                rusqlite::params![hot_id],
+            )
+            .unwrap();
+
+        let hot = store.get_memory(hot_id).unwrap().unwrap();
+        let cold = store.get_memory(cold_id).unwrap().unwrap();
+
+        let hot_w = access_weight(&hot, 20);
+        let cold_w = access_weight(&cold, 20);
+
+        assert!(hot_w > cold_w, "hot ({}) should weigh more than cold ({})", hot_w, cold_w);
+        assert!(hot_w >= 1.0 && hot_w <= 2.0, "access weight should be in [1.0, 2.0], got {}", hot_w);
+        assert!(cold_w >= 1.0, "cold access weight should be >= 1.0, got {}", cold_w);
+    }
+
+    #[test]
+    fn access_weight_is_bounded() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let id = store
+            .remember_episode("alpha bounded test", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        // Max out access count
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET access_count = 1000 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+
+        let mem = store.get_memory(id).unwrap().unwrap();
+        let w = access_weight(&mem, 1000);
+        assert!(w <= 2.0, "access weight should never exceed 2.0, got {}", w);
+    }
+
+    // ── Spreading activation tests ───────────────────────────
+
+    #[test]
+    fn spreading_activation_boosts_related_facts() {
+        // If "Jared has_pet Tortellini" scores high, then
+        // "Tortellini is_a dog" should get a boost via shared entity "Tortellini"
+        let mut results = vec![
+            RecallResult {
+                memory: make_fact_record(1, "Jared", "has_pet", "Tortellini"),
+                score: 1.0,
+            },
+            RecallResult {
+                memory: make_fact_record(2, "Tortellini", "is_a", "dog"),
+                score: 0.1, // low initial score
+            },
+            RecallResult {
+                memory: make_fact_record(3, "Abby", "likes", "cats"),
+                score: 0.1, // unrelated
+            },
+        ];
+
+        let original_related = results[1].score;
+        let original_unrelated = results[2].score;
+
+        spread_activation(&mut results, SPREAD_FACTOR);
+
+        assert!(
+            results[1].score > original_related,
+            "related fact should be boosted: {} > {}",
+            results[1].score,
+            original_related
+        );
+        assert_eq!(
+            results[2].score, original_unrelated,
+            "unrelated fact should not be boosted"
+        );
+    }
+
+    #[test]
+    fn spreading_activation_is_bidirectional() {
+        // Both directions: A->B and B->A should boost each other
+        let mut results = vec![
+            RecallResult {
+                memory: make_fact_record(1, "Jared", "works_at", "Microsoft"),
+                score: 0.8,
+            },
+            RecallResult {
+                memory: make_fact_record(2, "Microsoft", "located_in", "Seattle"),
+                score: 0.3,
+            },
+        ];
+
+        let score_a_before = results[0].score;
+        let score_b_before = results[1].score;
+
+        spread_activation(&mut results, SPREAD_FACTOR);
+
+        // A boosted B via shared "Microsoft"
+        assert!(results[1].score > score_b_before);
+        // B boosted A via shared "Microsoft"
+        assert!(results[0].score > score_a_before);
+    }
+
+    #[test]
+    fn spreading_activation_does_not_self_boost() {
+        let mut results = vec![
+            RecallResult {
+                memory: make_fact_record(1, "Jared", "builds", "Gen"),
+                score: 1.0,
+            },
+        ];
+
+        spread_activation(&mut results, SPREAD_FACTOR);
+        // Single result — no self-boost possible
+        assert!((results[0].score - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── Temporal co-occurrence tests ─────────────────────────
+
+    #[test]
+    fn temporal_cooccurrence_boosts_same_session_memories() {
+        let now = Utc::now();
+
+        let mut results = vec![
+            RecallResult {
+                memory: make_timed_episode(1, "alpha anchor memory", now),
+                score: 1.0,
+            },
+            RecallResult {
+                memory: make_timed_episode(2, "alpha nearby memory", now - chrono::Duration::minutes(5)),
+                score: 0.2,
+            },
+            RecallResult {
+                memory: make_timed_episode(3, "alpha distant memory", now - chrono::Duration::hours(3)),
+                score: 0.2,
+            },
+        ];
+
+        let nearby_before = results[1].score;
+        let distant_before = results[2].score;
+
+        temporal_cooccurrence_boost(&mut results);
+
+        assert!(
+            results[1].score > nearby_before,
+            "nearby memory should be boosted: {} > {}",
+            results[1].score,
+            nearby_before
+        );
+        assert_eq!(
+            results[2].score, distant_before,
+            "distant memory (>30min) should not be boosted"
+        );
+    }
+
+    #[test]
+    fn temporal_cooccurrence_scales_with_proximity() {
+        let now = Utc::now();
+
+        let mut results = vec![
+            RecallResult {
+                memory: make_timed_episode(1, "alpha anchor", now),
+                score: 1.0,
+            },
+            RecallResult {
+                memory: make_timed_episode(2, "alpha very close", now - chrono::Duration::minutes(2)),
+                score: 0.1,
+            },
+            RecallResult {
+                memory: make_timed_episode(3, "alpha further", now - chrono::Duration::minutes(25)),
+                score: 0.1,
+            },
+        ];
+
+        temporal_cooccurrence_boost(&mut results);
+
+        // 2-min-away should get more boost than 25-min-away
+        assert!(
+            results[1].score > results[2].score,
+            "closer memory ({}) should score higher than further one ({})",
+            results[1].score,
+            results[2].score
+        );
+    }
+
+    // ── Integration: full pipeline test ──────────────────────
+
+    #[test]
+    fn full_recall_pipeline_ranks_recent_accessed_related_higher() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let now = Utc::now();
+
+        // Create a cluster of related facts about a topic
+        store.remember_fact("Jared", "has_pet", "Tortellini", Some(&[1.0, 0.0])).unwrap();
+        store.remember_fact("Tortellini", "is_a", "dog", Some(&[1.0, 0.0])).unwrap();
+
+        // Create an old, unrelated memory
+        let old_id = store.remember_fact("weather", "is", "sunny", Some(&[0.5, 0.5])).unwrap();
+        let old_time = (now - chrono::Duration::days(60)).to_rfc3339();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET created_at = ?1, last_accessed_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_time, old_id],
+            )
+            .unwrap();
+
+        let results = recall(&store, "alpha", &MockEmbedder, 10).unwrap();
+
+        // The two Tortellini facts should be near the top (recent + related to each other)
+        // The old weather fact should be lower
+        if results.len() >= 3 {
+            let weather_pos = results.iter().position(|r| r.memory.id == old_id);
+            if let Some(pos) = weather_pos {
+                assert!(pos >= 2, "old unrelated memory should rank below related recent ones, was at position {}", pos);
+            }
+        }
+    }
+
+    // ── Test helpers ─────────────────────────────────────────
+
+    fn make_fact_record(id: i64, subj: &str, rel: &str, obj: &str) -> MemoryRecord {
+        MemoryRecord {
+            id,
+            kind: MemoryKind::Fact(crate::memory::Fact {
+                subject: subj.to_string(),
+                relation: rel.to_string(),
+                object: obj.to_string(),
+            }),
+            strength: 1.0,
+            created_at: Utc::now(),
+            last_accessed_at: Utc::now(),
+            access_count: 0,
+            embedding: None,
+        }
+    }
+
+    fn make_timed_episode(id: i64, text: &str, time: chrono::DateTime<Utc>) -> MemoryRecord {
+        MemoryRecord {
+            id,
+            kind: MemoryKind::Episode(crate::memory::Episode {
+                text: text.to_string(),
+            }),
+            strength: 1.0,
+            created_at: time,
+            last_accessed_at: time,
+            access_count: 0,
+            embedding: None,
+        }
+    }
+
+    // ── Original tests ───────────────────────────────────────
+
     #[test]
     fn recall_touch_applies_decay_then_reinforcement() {
         let store = MemoryStore::open_in_memory().unwrap();

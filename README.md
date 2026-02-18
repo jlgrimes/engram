@@ -108,6 +108,28 @@ conch export                                    # JSON to stdout
 conch import                                    # JSON from stdin
 ```
 
+## MCP Server
+
+Conch includes an MCP (Model Context Protocol) server for tool-based integration:
+
+```bash
+conch-mcp
+```
+
+Set `CONCH_DB` to customize the database path (default: `~/.conch/default.db`).
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `remember_fact` | Store a subject-relation-object triple |
+| `remember_episode` | Store a free-text event |
+| `recall` | Semantic search (BM25 + vector, ranked by relevance × strength × recency) |
+| `forget` | Delete by subject or age |
+| `forget_by_id` | Delete a specific memory by ID |
+| `decay` | Run temporal decay pass |
+| `stats` | Memory statistics |
+
 ## Scoring
 
 ```

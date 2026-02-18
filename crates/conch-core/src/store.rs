@@ -72,6 +72,46 @@ impl MemoryStore {
         Ok(self.conn.last_insert_rowid())
     }
 
+    // ── Find duplicates ────────────────────────────────────────
+
+    pub fn find_fact(&self, subject: &str, relation: &str, object: &str) -> SqlResult<Option<MemoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, subject, relation, object, episode_text,
+                    strength, embedding, created_at, last_accessed_at, access_count
+             FROM memories WHERE kind = 'fact' AND subject = ?1 AND relation = ?2 AND object = ?3",
+        )?;
+        let mut rows = stmt.query_map(params![subject, relation, object], row_to_memory)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn find_episode(&self, episode_text: &str) -> SqlResult<Option<MemoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, subject, relation, object, episode_text,
+                    strength, embedding, created_at, last_accessed_at, access_count
+             FROM memories WHERE kind = 'episode' AND episode_text = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![episode_text], row_to_memory)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn reinforce_memory(&self, id: i64) -> SqlResult<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE memories SET strength = MIN(strength + 0.1, 1.0),
+                                 last_accessed_at = ?1,
+                                 access_count = access_count + 1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
     // ── Recall ───────────────────────────────────────────────
 
     pub fn all_memories_with_text(&self) -> SqlResult<Vec<(MemoryRecord, String)>> {

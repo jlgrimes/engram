@@ -43,6 +43,11 @@ impl ConchDB {
     }
 
     pub fn remember_fact(&self, subject: &str, relation: &str, object: &str) -> Result<MemoryRecord, ConchError> {
+        // Check for existing duplicate
+        if let Some(existing) = self.store.find_fact(subject, relation, object)? {
+            self.store.reinforce_memory(existing.id)?;
+            return Ok(self.store.get_memory(existing.id)?.expect("just reinforced"));
+        }
         let text = format!("{subject} {relation} {object}");
         let embedding = self.embedder.embed_one(&text)?;
         let id = self.store.remember_fact(subject, relation, object, Some(&embedding))?;
@@ -50,6 +55,11 @@ impl ConchDB {
     }
 
     pub fn remember_episode(&self, text: &str) -> Result<MemoryRecord, ConchError> {
+        // Check for existing duplicate
+        if let Some(existing) = self.store.find_episode(text)? {
+            self.store.reinforce_memory(existing.id)?;
+            return Ok(self.store.get_memory(existing.id)?.expect("just reinforced"));
+        }
         let embedding = self.embedder.embed_one(text)?;
         let id = self.store.remember_episode(text, Some(&embedding))?;
         Ok(self.store.get_memory(id)?.expect("just inserted"))
@@ -125,5 +135,94 @@ impl ConchDB {
             count += 1;
         }
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embed::Embedding;
+
+    struct MockEmbedder;
+
+    impl Embedder for MockEmbedder {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Embedding>, EmbedError> {
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+        fn dimension(&self) -> usize { 2 }
+    }
+
+    #[test]
+    fn duplicate_fact_reinforces_instead_of_inserting() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        let first = db.remember_fact("Rust", "is", "great").unwrap();
+        assert_eq!(first.access_count, 0);
+        assert!((first.strength - 1.0).abs() < f64::EPSILON);
+
+        let second = db.remember_fact("Rust", "is", "great").unwrap();
+        // Should be the same record, reinforced
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.access_count, 1);
+        assert!((second.strength - 1.0).abs() < f64::EPSILON); // capped at 1.0
+
+        // Only one memory should exist
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.total_facts, 1);
+    }
+
+    #[test]
+    fn duplicate_fact_boosts_strength_when_decayed() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        let first = db.remember_fact("Rust", "is", "great").unwrap();
+        // Manually decay the strength
+        db.store().conn().execute(
+            "UPDATE memories SET strength = 0.5 WHERE id = ?1",
+            rusqlite::params![first.id],
+        ).unwrap();
+
+        let second = db.remember_fact("Rust", "is", "great").unwrap();
+        assert_eq!(second.id, first.id);
+        assert!((second.strength - 0.6).abs() < 1e-6); // 0.5 + 0.1
+    }
+
+    #[test]
+    fn different_facts_are_not_duplicates() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        let first = db.remember_fact("Rust", "is", "great").unwrap();
+        let second = db.remember_fact("Rust", "is", "fast").unwrap();
+        assert_ne!(first.id, second.id);
+
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.total_facts, 2);
+    }
+
+    #[test]
+    fn duplicate_episode_reinforces_instead_of_inserting() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        let first = db.remember_episode("had coffee this morning").unwrap();
+        assert_eq!(first.access_count, 0);
+
+        let second = db.remember_episode("had coffee this morning").unwrap();
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.access_count, 1);
+
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.total_episodes, 1);
+    }
+
+    #[test]
+    fn different_episodes_are_not_duplicates() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        let first = db.remember_episode("had coffee").unwrap();
+        let second = db.remember_episode("had tea").unwrap();
+        assert_ne!(first.id, second.id);
+
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.total_episodes, 2);
     }
 }

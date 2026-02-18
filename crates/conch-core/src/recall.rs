@@ -166,7 +166,7 @@ fn access_weight(mem: &MemoryRecord, max_access: i64) -> f64 {
 /// receive a fractional boost proportional to the parent's score. This
 /// implements Collins & Loftus (1975) spreading activation: querying "Max"
 /// will also boost "Jared has_pet Max" and "Max visited vet".
-fn spread_activation(results: &mut Vec<RecallResult>, factor: f64) {
+fn spread_activation(results: &mut [RecallResult], factor: f64) {
     // Build index: subject/object → list of result indices.
     let mut entity_index: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, r) in results.iter().enumerate() {
@@ -206,7 +206,7 @@ fn spread_activation(results: &mut Vec<RecallResult>, factor: f64) {
 /// Temporal co-occurrence boost: memories created within 30 minutes of a
 /// high-scoring result get a small boost, implementing contextual
 /// reinstatement (Tulving & Thomson, 1973).
-fn temporal_cooccurrence_boost(results: &mut Vec<RecallResult>) {
+fn temporal_cooccurrence_boost(results: &mut [RecallResult]) {
     if results.len() < 2 {
         return;
     }

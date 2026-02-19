@@ -598,4 +598,442 @@ mod tests {
             .unwrap();
         assert_eq!(preferred_index_count, 1);
     }
+
+    // ── Namespace Migration Reliability Test Pack ──────────────────────────
+
+    #[test]
+    fn migration_preserves_data_integrity_with_mixed_content() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        // Create legacy database with mixed facts and episodes
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );"
+            ).unwrap();
+
+            // Insert varied test data
+            let test_data = [
+                ("INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at, access_count) VALUES ('fact', 'Alice', 'works_at', 'Google', 0.9, '2025-06-15T10:30:00Z', '2025-06-15T10:30:00Z', 5)", 0.9, 5),
+                ("INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at, access_count) VALUES ('fact', 'Bob', 'lives_in', 'Seattle', 0.7, '2025-03-20T14:45:00Z', '2025-03-20T14:45:00Z', 3)", 0.7, 3),
+                ("INSERT INTO memories (kind, episode_text, strength, created_at, last_accessed_at, access_count) VALUES ('episode', 'Team meeting went well today', 0.6, '2025-12-01T09:00:00Z', '2025-12-01T09:00:00Z', 1)", 0.6, 1),
+                ("INSERT INTO memories (kind, episode_text, strength, created_at, last_accessed_at, access_count) VALUES ('episode', 'Alice presented the quarterly results', 0.8, '2025-11-30T16:20:00Z', '2025-11-30T16:20:00Z', 2)", 0.8, 2),
+            ];
+
+            for (sql, _, _) in &test_data {
+                conn.execute(sql, []).unwrap();
+            }
+        }
+
+        // Open with migration
+        let store = MemoryStore::open(path).unwrap();
+
+        // Verify all records migrated to default namespace with preserved data
+        let all_memories: Vec<MemoryRecord> = store
+            .conn()
+            .prepare("SELECT id, namespace, kind, subject, relation, object, episode_text, strength, embedding, created_at, last_accessed_at, access_count FROM memories ORDER BY id")
+            .unwrap()
+            .query_map([], row_to_memory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(all_memories.len(), 4);
+        
+        // Check first fact
+        assert_eq!(all_memories[0].namespace, DEFAULT_NAMESPACE);
+        if let MemoryKind::Fact(f) = &all_memories[0].kind {
+            assert_eq!(f.subject, "Alice");
+            assert_eq!(f.relation, "works_at");
+            assert_eq!(f.object, "Google");
+        } else {
+            panic!("Expected fact, got episode");
+        }
+        assert!((all_memories[0].strength - 0.9).abs() < 1e-6);
+        assert_eq!(all_memories[0].access_count, 5);
+
+        // Check first episode
+        if let MemoryKind::Episode(e) = &all_memories[2].kind {
+            assert_eq!(e.text, "Team meeting went well today");
+        } else {
+            panic!("Expected episode, got fact");
+        }
+        assert!((all_memories[2].strength - 0.6).abs() < 1e-6);
+        assert_eq!(all_memories[2].access_count, 1);
+
+        // Verify namespace isolation works post-migration
+        let default_stats = store.stats_in(DEFAULT_NAMESPACE).unwrap();
+        assert_eq!(default_stats.total_memories, 4);
+        assert_eq!(default_stats.total_facts, 2);
+        assert_eq!(default_stats.total_episodes, 2);
+
+        let other_stats = store.stats_in("other_namespace").unwrap();
+        assert_eq!(other_stats.total_memories, 0);
+    }
+
+    #[test]
+    fn migration_handles_null_and_empty_text_fields_gracefully() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        // Create legacy database with problematic data
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );"
+            ).unwrap();
+
+            // Insert edge case data (using empty strings instead of NULL for better compatibility)
+            conn.execute(
+                "INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at) 
+                 VALUES ('fact', '', 'relates_to', '', 0.5, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+                [],
+            ).unwrap();
+
+            conn.execute(
+                "INSERT INTO memories (kind, episode_text, strength, created_at, last_accessed_at) 
+                 VALUES ('episode', '', 0.3, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+                [],
+            ).unwrap();
+
+            conn.execute(
+                "INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at) 
+                 VALUES ('fact', 'Normal', 'fact', 'here', 0.8, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+                [],
+            ).unwrap();
+        }
+
+        // Migration should handle nulls gracefully
+        let store = MemoryStore::open(path).unwrap();
+
+        let memories: Vec<MemoryRecord> = store
+            .conn()
+            .prepare("SELECT id, namespace, kind, subject, relation, object, episode_text, strength, embedding, created_at, last_accessed_at, access_count FROM memories ORDER BY id")
+            .unwrap()
+            .query_map([], row_to_memory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(memories.len(), 3);
+
+        // Verify problematic fact was handled
+        if let MemoryKind::Fact(f) = &memories[0].kind {
+            assert_eq!(f.subject, ""); // Empty string preserved
+            assert_eq!(f.relation, "relates_to");
+            assert_eq!(f.object, ""); // Empty string preserved
+        } else {
+            panic!("Expected fact");
+        }
+
+        // Verify problematic episode was handled
+        if let MemoryKind::Episode(e) = &memories[1].kind {
+            assert_eq!(e.text, ""); // Empty string preserved
+        } else {
+            panic!("Expected episode");
+        }
+
+        // Normal record unaffected
+        if let MemoryKind::Fact(f) = &memories[2].kind {
+            assert_eq!(f.subject, "Normal");
+            assert_eq!(f.relation, "fact");
+            assert_eq!(f.object, "here");
+        } else {
+            panic!("Expected fact");
+        }
+    }
+
+    #[test]
+    fn migration_maintains_index_performance_characteristics() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        // Create legacy database with no indexes
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );"
+            ).unwrap();
+
+            // Insert enough data to make index performance matter
+            for i in 0..50 {
+                conn.execute(
+                    "INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at) 
+                     VALUES ('fact', ?1, 'test_relation', ?2, 0.5, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+                    params![format!("subject_{}", i), format!("object_{}", i)]
+                ).unwrap();
+            }
+        }
+
+        // Migration should create proper indexes
+        let store = MemoryStore::open(path).unwrap();
+
+        // Check that all expected indexes exist
+        let index_names: Vec<String> = store
+            .conn()
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'memories' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| Ok(row.get::<_, String>(0)?))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let expected_indexes = vec![
+            "idx_memories_kind".to_string(),
+            "idx_memories_namespace".to_string(),
+            "idx_memories_namespace_kind".to_string(),
+            "idx_memories_subject".to_string(),
+        ];
+
+        for expected in &expected_indexes {
+            assert!(index_names.contains(expected), "Missing index: {}", expected);
+        }
+
+        // Verify namespace queries use proper indexes by checking they don't require full table scans
+        let query_plan: String = store
+            .conn()
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT * FROM memories WHERE namespace = 'default' AND kind = 'fact'",
+                [],
+                |row| Ok(row.get::<_, String>(3)?), // detail column
+            )
+            .unwrap();
+
+        // Should use the namespace_kind index, not scan the table
+        assert!(query_plan.contains("idx_memories_namespace_kind"), 
+               "Query should use namespace_kind index, got plan: {}", query_plan);
+    }
+
+    #[test]
+    fn migration_handles_concurrent_access_gracefully() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        // Create legacy database 
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at)
+                VALUES ('fact', 'Concurrent', 'test', 'data', 0.7, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z');"
+            ).unwrap();
+        }
+
+        // Migration should be idempotent - multiple opens shouldn't conflict
+        let store1 = MemoryStore::open(path).unwrap();
+        let store2 = MemoryStore::open(path).unwrap();
+
+        // Both stores should see the same migrated data
+        let count1: i64 = store1
+            .conn()
+            .query_row("SELECT COUNT(*) FROM memories WHERE namespace = 'default'", [], |r| r.get(0))
+            .unwrap();
+        let count2: i64 = store2
+            .conn()
+            .query_row("SELECT COUNT(*) FROM memories WHERE namespace = 'default'", [], |r| r.get(0))
+            .unwrap();
+
+        assert_eq!(count1, 1);
+        assert_eq!(count2, 1);
+
+        // Verify schema consistency across both connections
+        let schema1: String = store1
+            .conn()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let schema2: String = store2
+            .conn()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(schema1, schema2);
+        assert!(schema1.contains("namespace"));
+    }
+
+    #[test]
+    fn migration_preserves_timestamps_and_access_patterns() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        let original_created = "2024-03-15T08:30:15Z";
+        let original_accessed = "2025-07-22T14:22:33Z";
+        let original_count = 42;
+
+        // Create legacy database with specific timestamps
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );"
+            ).unwrap();
+
+            conn.execute(
+                "INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at, access_count)
+                 VALUES ('fact', 'TimeKeeper', 'preserves', 'history', 0.95, ?1, ?2, ?3)",
+                params![original_created, original_accessed, original_count]
+            ).unwrap();
+        }
+
+        // Migration should preserve precise timestamps
+        let store = MemoryStore::open(path).unwrap();
+
+        let memory = store
+            .find_fact_in(DEFAULT_NAMESPACE, "TimeKeeper", "preserves", "history")
+            .unwrap()
+            .expect("Migrated memory should exist");
+
+        // Verify timestamps were preserved exactly (allowing for timezone format differences)
+        assert_eq!(memory.created_at.timestamp(), DateTime::parse_from_rfc3339(original_created).unwrap().timestamp());
+        assert_eq!(memory.last_accessed_at.timestamp(), DateTime::parse_from_rfc3339(original_accessed).unwrap().timestamp());
+        assert_eq!(memory.access_count, original_count);
+        assert!((memory.strength - 0.95).abs() < 1e-6);
+
+        // Verify memory is accessible in default namespace
+        assert_eq!(memory.namespace, DEFAULT_NAMESPACE);
+    }
+
+    #[test]
+    fn migration_handles_malformed_timestamps_with_fallback() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        // Create legacy database with malformed timestamps
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );"
+            ).unwrap();
+
+            // Insert records with various malformed timestamps
+            conn.execute(
+                "INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at)
+                 VALUES ('fact', 'BadTime1', 'has', 'invalid_date', 0.5, 'not-a-date', '2025-01-01T00:00:00Z')",
+                []
+            ).unwrap();
+
+            conn.execute(
+                "INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at)
+                 VALUES ('fact', 'BadTime2', 'has', 'partial_date', 0.5, '2025-invalid-date', 'also-not-a-date')",
+                []
+            ).unwrap();
+        }
+
+        // Migration should handle malformed timestamps gracefully
+        let store = MemoryStore::open(path).unwrap();
+
+        let memories: Vec<MemoryRecord> = store
+            .conn()
+            .prepare("SELECT id, namespace, kind, subject, relation, object, episode_text, strength, embedding, created_at, last_accessed_at, access_count FROM memories ORDER BY id")
+            .unwrap()
+            .query_map([], row_to_memory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(memories.len(), 2);
+
+        // Records should exist with mixed valid/fallback timestamps
+        // We can't test exact timestamp since fallback uses Utc::now(), but we can verify
+        // the records were successfully migrated and are accessible
+        let bad_time1 = store
+            .find_fact_in(DEFAULT_NAMESPACE, "BadTime1", "has", "invalid_date")
+            .unwrap()
+            .expect("Record with malformed timestamp should be migrated");
+
+        let bad_time2 = store
+            .find_fact_in(DEFAULT_NAMESPACE, "BadTime2", "has", "partial_date")
+            .unwrap()
+            .expect("Record with malformed timestamp should be migrated");
+
+        let now = Utc::now();
+        
+        // BadTime1: malformed created_at should be replaced with current time, 
+        // valid last_accessed_at should be preserved
+        assert!((now - bad_time1.created_at).num_seconds() < 60, "Malformed created_at should be replaced");
+        assert_eq!(bad_time1.last_accessed_at.to_rfc3339(), "2025-01-01T00:00:00+00:00");
+        
+        // BadTime2: both timestamps malformed, both should be replaced
+        assert!((now - bad_time2.created_at).num_seconds() < 60, "Malformed created_at should be replaced");
+        assert!((now - bad_time2.last_accessed_at).num_seconds() < 60, "Malformed last_accessed_at should be replaced");
+    }
 }

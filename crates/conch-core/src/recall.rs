@@ -996,4 +996,309 @@ mod tests {
         // But reinforcement should keep it above a tiny decayed floor.
         assert!(after.strength > 0.2);
     }
+
+    // ── Recall Determinism Regression Suite ─────────────────────────────────
+
+    use crate::recall_scoring::{
+        spread_activation_boosts, temporal_cooccurrence_boosts
+    };
+
+    /// Test deterministic behavior of core scoring functions with fixed inputs.
+    /// These functions should produce identical outputs for identical inputs.
+    #[test]
+    fn recall_scoring_functions_are_deterministic() {
+        let now = chrono::DateTime::from_timestamp(1640995200, 0).unwrap(); // Fixed timestamp: 2022-01-01 00:00:00 UTC
+        
+        // Test recency_boost determinism
+        let memory_recent = MemoryRecord {
+            id: 1,
+            namespace: "test".to_string(),
+            kind: MemoryKind::Episode(crate::memory::Episode {
+                text: "Recent memory".to_string(),
+            }),
+            strength: 1.0,
+            embedding: Some(vec![0.5; 4]),
+            created_at: now - chrono::Duration::hours(6), // 6 hours ago
+            last_accessed_at: now - chrono::Duration::hours(6),
+            access_count: 2,
+        };
+        
+        // Test multiple runs produce identical recency boosts
+        let boosts: Vec<f64> = (0..5)
+            .map(|_| recency_boost(&memory_recent, now))
+            .collect();
+        
+        for i in 1..boosts.len() {
+            assert!((boosts[0] - boosts[i]).abs() < 1e-15, 
+                   "Recency boost not deterministic: {} vs {}", boosts[0], boosts[i]);
+        }
+        
+        // Test access_weight determinism
+        let max_access = 10i64;
+        let weights: Vec<f64> = (0..5)
+            .map(|_| access_weight(&memory_recent, max_access))
+            .collect();
+        
+        for i in 1..weights.len() {
+            assert!((weights[0] - weights[i]).abs() < 1e-15,
+                   "Access weight not deterministic: {} vs {}", weights[0], weights[i]);
+        }
+        
+        // Test effective_strength determinism
+        let strengths: Vec<f64> = (0..5)
+            .map(|_| effective_strength(&memory_recent, now))
+            .collect();
+        
+        for i in 1..strengths.len() {
+            assert!((strengths[0] - strengths[i]).abs() < 1e-15,
+                   "Effective strength not deterministic: {} vs {}", strengths[0], strengths[i]);
+        }
+    }
+
+    #[test]
+    fn spreading_activation_boosts_are_deterministic() {
+        let now = chrono::DateTime::from_timestamp(1640995200, 0).unwrap();
+        
+        // Create fixed recall results for spreading activation
+        let results = vec![
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 1,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Fact(crate::memory::Fact {
+                        subject: "Rust".to_string(),
+                        relation: "is".to_string(),
+                        object: "systems language".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                    created_at: now,
+                    last_accessed_at: now,
+                    access_count: 1,
+                },
+                score: 0.8,
+                explanation: None,
+                diagnostics: None,
+            },
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 2,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Fact(crate::memory::Fact {
+                        subject: "Rust".to_string(),
+                        relation: "supports".to_string(),
+                        object: "memory safety".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![0.8, 0.2, 0.0, 0.0]),
+                    created_at: now,
+                    last_accessed_at: now,
+                    access_count: 1,
+                },
+                score: 0.6,
+                explanation: None,
+                diagnostics: None,
+            },
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 3,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Fact(crate::memory::Fact {
+                        subject: "Python".to_string(),
+                        relation: "is".to_string(),
+                        object: "interpreted language".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![0.5, 0.5, 0.0, 0.0]),
+                    created_at: now,
+                    last_accessed_at: now,
+                    access_count: 1,
+                },
+                score: 0.4,
+                explanation: None,
+                diagnostics: None,
+            },
+        ];
+        
+        // Test spreading activation boost determinism across multiple runs
+        let factor = 0.15;
+        let boost_sets: Vec<Vec<f64>> = (0..5)
+            .map(|_| spread_activation_boosts(&results, factor))
+            .collect();
+        
+        // Verify all runs produce identical boosts
+        for run_idx in 1..boost_sets.len() {
+            assert_eq!(boost_sets[0].len(), boost_sets[run_idx].len());
+            
+            for (pos, (&first_boost, &current_boost)) in 
+                boost_sets[0].iter().zip(boost_sets[run_idx].iter()).enumerate() {
+                assert!((first_boost - current_boost).abs() < 1e-15,
+                       "Spreading activation boost not deterministic at position {} in run {}: {} vs {}",
+                       pos, run_idx, first_boost, current_boost);
+            }
+        }
+        
+        // Verify connected facts (sharing "Rust" entity) get positive boosts  
+        assert!(boost_sets[0][1] > 0.0, "Connected Rust fact should get positive boost");
+        assert_eq!(boost_sets[0][2], 0.0, "Unconnected Python fact should get no boost");
+    }
+    
+    #[test]
+    fn temporal_cooccurrence_boosts_are_deterministic() {
+        let now = chrono::DateTime::from_timestamp(1640995200, 0).unwrap();
+        
+        // Create temporally clustered recall results
+        let results = vec![
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 1,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Episode(crate::memory::Episode {
+                        text: "Started Rust project".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                    created_at: now - chrono::Duration::minutes(10), // Within 30min window
+                    last_accessed_at: now - chrono::Duration::minutes(10),
+                    access_count: 1,
+                },
+                score: 0.9,  // High anchor score
+                explanation: None,
+                diagnostics: None,
+            },
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 2,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Episode(crate::memory::Episode {
+                        text: "Setup Rust toolchain".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![0.8, 0.2, 0.0, 0.0]),
+                    created_at: now - chrono::Duration::minutes(5), // Within 30min window
+                    last_accessed_at: now - chrono::Duration::minutes(5),
+                    access_count: 1,
+                },
+                score: 0.5,
+                explanation: None,
+                diagnostics: None,
+            },
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 3,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Episode(crate::memory::Episode {
+                        text: "Deployed Python service".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![0.5, 0.5, 0.0, 0.0]),
+                    created_at: now - chrono::Duration::hours(3), // Outside 30min window
+                    last_accessed_at: now - chrono::Duration::hours(3),
+                    access_count: 1,
+                },
+                score: 0.3,
+                explanation: None,
+                diagnostics: None,
+            },
+        ];
+        
+        // Test temporal cooccurrence boost determinism across multiple runs
+        let boost_sets: Vec<Vec<f64>> = (0..5)
+            .map(|_| temporal_cooccurrence_boosts(&results))
+            .collect();
+        
+        // Verify all runs produce identical boosts
+        for run_idx in 1..boost_sets.len() {
+            assert_eq!(boost_sets[0].len(), boost_sets[run_idx].len());
+            
+            for (pos, (&first_boost, &current_boost)) in 
+                boost_sets[0].iter().zip(boost_sets[run_idx].iter()).enumerate() {
+                assert!((first_boost - current_boost).abs() < 1e-15,
+                       "Temporal cooccurrence boost not deterministic at position {} in run {}: {} vs {}",
+                       pos, run_idx, first_boost, current_boost);
+            }
+        }
+        
+        // Verify temporally clustered memories get boosts
+        assert!(boost_sets[0][1] > 0.0, "Temporally close memory should get positive boost");
+        assert_eq!(boost_sets[0][2], 0.0, "Temporally distant memory should get no boost");
+    }
+    
+    #[test] 
+    fn recall_result_ordering_stability_with_fixed_scores() {
+        // Test that identical RecallResults are ordered consistently
+        let now = chrono::DateTime::from_timestamp(1640995200, 0).unwrap();
+        
+        let results = vec![
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 1,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Episode(crate::memory::Episode {
+                        text: "High score memory".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
+                    created_at: now,
+                    last_accessed_at: now,
+                    access_count: 1,
+                },
+                score: 0.9,
+                explanation: None,
+                diagnostics: None,
+            },
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 2,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Episode(crate::memory::Episode {
+                        text: "Medium score memory".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![0.8, 0.2, 0.0, 0.0]),
+                    created_at: now,
+                    last_accessed_at: now,
+                    access_count: 1,
+                },
+                score: 0.5,
+                explanation: None,
+                diagnostics: None,
+            },
+            RecallResult {
+                memory: MemoryRecord {
+                    id: 3,
+                    namespace: "test".to_string(),
+                    kind: MemoryKind::Episode(crate::memory::Episode {
+                        text: "Low score memory".to_string(),
+                    }),
+                    strength: 1.0,
+                    embedding: Some(vec![0.5, 0.5, 0.0, 0.0]),
+                    created_at: now,
+                    last_accessed_at: now,
+                    access_count: 1,
+                },
+                score: 0.1,
+                explanation: None,
+                diagnostics: None,
+            },
+        ];
+        
+        // Test sorting stability across multiple runs
+        let mut sorted_orders = Vec::new();
+        for _ in 0..5 {
+            let mut test_results = results.clone();
+            test_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            let order: Vec<i64> = test_results.iter().map(|r| r.memory.id).collect();
+            sorted_orders.push(order);
+        }
+        
+        // Verify identical ordering across all runs
+        for run_idx in 1..sorted_orders.len() {
+            assert_eq!(sorted_orders[0], sorted_orders[run_idx],
+                      "Sorting order not deterministic in run {}", run_idx);
+        }
+        
+        // Verify expected order (highest score first)
+        assert_eq!(sorted_orders[0], vec![1, 2, 3], "Results not sorted by score correctly");
+    }
 }

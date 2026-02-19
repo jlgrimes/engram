@@ -36,6 +36,14 @@ pub struct MemoryRecord {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+}
+
+fn default_namespace() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +57,35 @@ pub struct MemoryStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportData {
     pub memories: Vec<MemoryRecord>,
+}
+
+// ── Audit log types ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub timestamp: DateTime<Utc>,
+    pub action: String,
+    pub memory_id: Option<i64>,
+    pub actor: String,
+    pub details_json: Option<String>,
+}
+
+// ── Verification types ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyResult {
+    pub total_checked: usize,
+    pub valid: usize,
+    pub corrupted: Vec<CorruptedMemory>,
+    pub missing_checksum: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorruptedMemory {
+    pub id: i64,
+    pub expected: String,
+    pub actual: String,
 }
 
 /// Result of a remember operation, indicating whether the memory was newly

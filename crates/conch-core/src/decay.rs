@@ -28,16 +28,29 @@ pub fn run_decay(
     decay_factor: Option<f64>,
     half_life_hours: Option<f64>,
 ) -> Result<DecayResult, rusqlite::Error> {
+    run_decay_ns(store, decay_factor, half_life_hours, "default")
+}
+
+pub fn run_decay_ns(
+    store: &MemoryStore,
+    decay_factor: Option<f64>,
+    half_life_hours: Option<f64>,
+    namespace: &str,
+) -> Result<DecayResult, rusqlite::Error> {
     let factor = decay_factor.unwrap_or(DEFAULT_DECAY_FACTOR);
     let half_life = half_life_hours.unwrap_or(DEFAULT_HALF_LIFE_HOURS);
 
-    let decayed = store.decay_all(factor, half_life)?;
+    let decayed = store.decay_all_ns(factor, half_life, namespace)?;
 
-    // Delete memories that have decayed below minimum strength
+    // Delete memories that have decayed below minimum strength (namespace-scoped)
     let deleted: usize = store.conn().execute(
-        "DELETE FROM memories WHERE strength < ?1",
-        rusqlite::params![MIN_STRENGTH],
+        "DELETE FROM memories WHERE strength < ?1 AND namespace = ?2",
+        rusqlite::params![MIN_STRENGTH, namespace],
     )?;
+
+    if deleted > 0 {
+        store.log_audit("decay_delete", None, "system", Some(&format!("{{\"deleted\":{deleted},\"namespace\":{}}}", serde_json::json!(namespace))))?;
+    }
 
     Ok(DecayResult { decayed, deleted })
 }

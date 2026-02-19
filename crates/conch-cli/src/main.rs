@@ -11,6 +11,9 @@ struct Cli {
     json: bool,
     #[arg(long, global = true)]
     quiet: bool,
+    /// Namespace for memory isolation (default: "default")
+    #[arg(long, global = true, default_value = "default")]
+    namespace: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -79,6 +82,19 @@ enum Command {
     Export,
     /// Import memories from JSON on stdin
     Import,
+    /// Show recent audit log entries
+    Log {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Filter by memory ID
+        #[arg(long)]
+        memory_id: Option<i64>,
+        /// Filter by actor
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    /// Verify integrity of all memory checksums
+    Verify,
 }
 
 fn default_db_path() -> String {
@@ -113,7 +129,7 @@ fn main() {
     if let Some(parent) = std::path::Path::new(&cli.db).parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let db = match ConchDB::open(&cli.db) {
+    let db = match ConchDB::open_with_namespace(&cli.db, &cli.namespace) {
         Ok(db) => db,
         Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
     };
@@ -194,6 +210,7 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
             let stats = db.stats()?;
             if cli.json { println!("{}", serde_json::to_string_pretty(&stats)?); }
             else if !cli.quiet {
+                println!("Namespace: {}", cli.namespace);
                 println!("Memories: {} ({} facts, {} episodes)", stats.total_memories, stats.total_facts, stats.total_episodes);
                 println!("Avg strength: {:.3}", stats.avg_strength);
             }
@@ -216,6 +233,37 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
             let count = db.import(&data)?;
             if cli.json { println!("{}", serde_json::json!({ "imported": count })); }
             else if !cli.quiet { println!("Imported {count} memories."); }
+        }
+        Command::Log { limit, memory_id, actor } => {
+            let entries = db.audit_log(*limit, *memory_id, actor.as_deref())?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else if !cli.quiet {
+                if entries.is_empty() { println!("No audit log entries."); }
+                for e in &entries {
+                    let mid = e.memory_id.map(|id| format!(" mem:{id}")).unwrap_or_default();
+                    let details = e.details_json.as_deref().unwrap_or("");
+                    println!("[{}] {} ({}){} {}", e.timestamp.format("%Y-%m-%d %H:%M:%S"), e.action, e.actor, mid, details);
+                }
+            }
+        }
+        Command::Verify => {
+            let result = db.verify()?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else if !cli.quiet {
+                println!("Checked: {}", result.total_checked);
+                println!("Valid: {}", result.valid);
+                println!("Missing checksum: {}", result.missing_checksum);
+                if result.corrupted.is_empty() {
+                    println!("No corruption detected.");
+                } else {
+                    println!("CORRUPTED: {} memories", result.corrupted.len());
+                    for c in &result.corrupted {
+                        println!("  id: {} expected: {} actual: {}", c.id, c.expected, c.actual);
+                    }
+                }
+            }
         }
     }
     Ok(())

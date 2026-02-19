@@ -4,7 +4,7 @@ pub mod embed;
 pub mod decay;
 pub mod recall;
 
-pub use memory::{Episode, ExportData, Fact, MemoryKind, MemoryRecord, MemoryStats, RememberResult};
+pub use memory::{Episode, ExportData, Fact, MemoryKind, MemoryRecord, MemoryStats, RememberResult, AuditEntry, VerifyResult, CorruptedMemory};
 pub use store::MemoryStore;
 pub use embed::{Embedder, EmbedError, FastEmbedder, SharedEmbedder, cosine_similarity};
 pub use decay::{run_decay, DecayResult};
@@ -16,6 +16,7 @@ use chrono::Duration;
 pub struct ConchDB {
     store: MemoryStore,
     embedder: Box<dyn Embedder>,
+    namespace: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -28,14 +29,26 @@ pub enum ConchError {
 
 impl ConchDB {
     pub fn open(path: &str) -> Result<Self, ConchError> {
+        Self::open_with_namespace(path, "default")
+    }
+
+    pub fn open_with_namespace(path: &str, namespace: &str) -> Result<Self, ConchError> {
         let store = MemoryStore::open(path)?;
         let embedder = embed::FastEmbedder::new()?;
-        Ok(Self { store, embedder: Box::new(embedder) })
+        Ok(Self { store, embedder: Box::new(embedder), namespace: namespace.to_string() })
     }
 
     pub fn open_in_memory_with(embedder: Box<dyn Embedder>) -> Result<Self, ConchError> {
+        Self::open_in_memory_with_namespace(embedder, "default")
+    }
+
+    pub fn open_in_memory_with_namespace(embedder: Box<dyn Embedder>, namespace: &str) -> Result<Self, ConchError> {
         let store = MemoryStore::open_in_memory()?;
-        Ok(Self { store, embedder })
+        Ok(Self { store, embedder, namespace: namespace.to_string() })
+    }
+
+    pub fn namespace(&self) -> &str {
+        &self.namespace
     }
 
     pub fn store(&self) -> &MemoryStore {
@@ -56,7 +69,7 @@ impl ConchDB {
     ) -> Result<MemoryRecord, ConchError> {
         let text = format!("{subject} {relation} {object}");
         let embedding = self.embedder.embed_one(&text)?;
-        let id = self.store.remember_fact_full(subject, relation, object, Some(&embedding), tags, source, session_id, channel)?;
+        let id = self.store.remember_fact_ns(subject, relation, object, Some(&embedding), tags, source, session_id, channel, &self.namespace)?;
         Ok(self.store.get_memory(id)?.expect("just inserted"))
     }
 
@@ -70,7 +83,7 @@ impl ConchDB {
     pub fn upsert_fact_with_tags(&self, subject: &str, relation: &str, object: &str, tags: &[String]) -> Result<(MemoryRecord, bool), ConchError> {
         let text = format!("{subject} {relation} {object}");
         let embedding = self.embedder.embed_one(&text)?;
-        let (id, was_updated) = self.store.upsert_fact(subject, relation, object, Some(&embedding), tags, None, None, None)?;
+        let (id, was_updated) = self.store.upsert_fact_ns(subject, relation, object, Some(&embedding), tags, None, None, None, &self.namespace)?;
         Ok((self.store.get_memory(id)?.expect("just upserted"), was_updated))
     }
 
@@ -87,7 +100,7 @@ impl ConchDB {
         source: Option<&str>, session_id: Option<&str>, channel: Option<&str>,
     ) -> Result<MemoryRecord, ConchError> {
         let embedding = self.embedder.embed_one(text)?;
-        let id = self.store.remember_episode_full(text, Some(&embedding), tags, source, session_id, channel)?;
+        let id = self.store.remember_episode_ns(text, Some(&embedding), tags, source, session_id, channel, &self.namespace)?;
         Ok(self.store.get_memory(id)?.expect("just inserted"))
     }
 
@@ -107,7 +120,7 @@ impl ConchDB {
     }
 
     fn find_duplicate_excluding(&self, embedding: &[f32], exclude_id: i64) -> Result<Option<(i64, f32)>, ConchError> {
-        let all = self.store.all_embeddings()?;
+        let all = self.store.all_embeddings_ns(&self.namespace)?;
         let mut best: Option<(i64, f32)> = None;
         for (id, existing_emb) in &all {
             if *id == exclude_id {
@@ -148,8 +161,8 @@ impl ConchDB {
         let embedding = self.embedder.embed_one(&text)?;
 
         // Step 1: Upsert — check for existing fact with same subject+relation
-        let (id, was_updated) = self.store.upsert_fact(
-            subject, relation, object, Some(&embedding), tags, source, session_id, channel,
+        let (id, was_updated) = self.store.upsert_fact_ns(
+            subject, relation, object, Some(&embedding), tags, source, session_id, channel, &self.namespace,
         )?;
         if was_updated {
             let record = self.store.get_memory(id)?.expect("just upserted");
@@ -194,7 +207,7 @@ impl ConchDB {
             return Ok(RememberResult::Duplicate { existing, similarity });
         }
 
-        let id = self.store.remember_episode_full(text, Some(&embedding), tags, source, session_id, channel)?;
+        let id = self.store.remember_episode_ns(text, Some(&embedding), tags, source, session_id, channel, &self.namespace)?;
         let record = self.store.get_memory(id)?.expect("just inserted");
         Ok(RememberResult::Created(record))
     }
@@ -204,7 +217,7 @@ impl ConchDB {
     }
 
     pub fn recall_with_tag(&self, query: &str, limit: usize, tag: Option<&str>) -> Result<Vec<RecallResult>, ConchError> {
-        recall::recall_with_tag_filter(&self.store, query, self.embedder.as_ref(), limit, tag)
+        recall::recall_with_tag_filter_ns(&self.store, query, self.embedder.as_ref(), limit, tag, &self.namespace)
             .map_err(|e| match e {
                 RecallError::Db(e) => ConchError::Db(e),
                 RecallError::Embedding(msg) => ConchError::Embed(EmbedError::Other(msg)),
@@ -212,7 +225,7 @@ impl ConchDB {
     }
 
     pub fn forget_by_subject(&self, subject: &str) -> Result<usize, ConchError> {
-        Ok(self.store.forget_by_subject(subject)?)
+        Ok(self.store.forget_by_subject_ns(subject, &self.namespace)?)
     }
 
     pub fn forget_by_id(&self, id: &str) -> Result<usize, ConchError> {
@@ -220,15 +233,15 @@ impl ConchDB {
     }
 
     pub fn forget_older_than(&self, secs: i64) -> Result<usize, ConchError> {
-        Ok(self.store.forget_older_than(Duration::seconds(secs))?)
+        Ok(self.store.forget_older_than_ns(Duration::seconds(secs), &self.namespace)?)
     }
 
     pub fn decay(&self) -> Result<DecayResult, ConchError> {
-        Ok(decay::run_decay(&self.store, None, None)?)
+        Ok(decay::run_decay_ns(&self.store, None, None, &self.namespace)?)
     }
 
     pub fn stats(&self) -> Result<MemoryStats, ConchError> {
-        Ok(self.store.stats()?)
+        Ok(self.store.stats_ns(&self.namespace)?)
     }
 
     pub fn embed_all(&self) -> Result<usize, ConchError> {
@@ -246,7 +259,7 @@ impl ConchDB {
     }
 
     pub fn export(&self) -> Result<ExportData, ConchError> {
-        let memories = self.store.all_memories()?;
+        let memories = self.store.all_memories_ns(&self.namespace)?;
         Ok(ExportData { memories })
     }
 
@@ -257,7 +270,7 @@ impl ConchDB {
             let accessed = mem.last_accessed_at.to_rfc3339();
             match &mem.kind {
                 MemoryKind::Fact(f) => {
-                    self.store.import_fact(
+                    self.store.import_fact_ns(
                         &f.subject, &f.relation, &f.object,
                         mem.strength, mem.embedding.as_deref(),
                         &created, &accessed, mem.access_count,
@@ -265,22 +278,36 @@ impl ConchDB {
                         mem.source.as_deref(),
                         mem.session_id.as_deref(),
                         mem.channel.as_deref(),
+                        &self.namespace,
                     )?;
                 }
                 MemoryKind::Episode(e) => {
-                    self.store.import_episode(
+                    self.store.import_episode_ns(
                         &e.text, mem.strength, mem.embedding.as_deref(),
                         &created, &accessed, mem.access_count,
                         &mem.tags,
                         mem.source.as_deref(),
                         mem.session_id.as_deref(),
                         mem.channel.as_deref(),
+                        &self.namespace,
                     )?;
                 }
             }
             count += 1;
         }
         Ok(count)
+    }
+
+    // ── Security: Audit Log ─────────────────────────────────
+
+    pub fn audit_log(&self, limit: usize, memory_id: Option<i64>, actor: Option<&str>) -> Result<Vec<AuditEntry>, ConchError> {
+        Ok(self.store.get_audit_log(limit, memory_id, actor)?)
+    }
+
+    // ── Security: Verify ────────────────────────────────────
+
+    pub fn verify(&self) -> Result<VerifyResult, ConchError> {
+        Ok(self.store.verify_integrity_ns(&self.namespace)?)
     }
 }
 
@@ -529,5 +556,152 @@ mod tests {
         assert!(!r2.is_duplicate(), "orthogonal embeddings should not trigger dedup");
 
         assert_eq!(db.stats().unwrap().total_memories, 2);
+    }
+
+    // ── Security: Namespace isolation tests ──────────────────
+
+    #[test]
+    fn namespace_isolation_facts() {
+        // Test at the store level since we can't share store between ConchDB instances
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact_ns("X", "is", "A", None, &[], None, None, None, "ns-a").unwrap();
+        store.remember_fact_ns("Y", "is", "B", None, &[], None, None, None, "ns-b").unwrap();
+
+        let stats_a = store.stats_ns("ns-a").unwrap();
+        let stats_b = store.stats_ns("ns-b").unwrap();
+        assert_eq!(stats_a.total_memories, 1);
+        assert_eq!(stats_b.total_memories, 1);
+
+        // Default namespace should be empty
+        let stats_default = store.stats_ns("default").unwrap();
+        assert_eq!(stats_default.total_memories, 0, "default namespace should be empty");
+
+        // Namespace-scoped queries only return their own memories
+        let ns_a_mems = store.all_memories_ns("ns-a").unwrap();
+        let ns_b_mems = store.all_memories_ns("ns-b").unwrap();
+        assert_eq!(ns_a_mems.len(), 1);
+        assert_eq!(ns_b_mems.len(), 1);
+        assert_ne!(ns_a_mems[0].id, ns_b_mems[0].id);
+    }
+
+    #[test]
+    fn namespace_isolation_recall() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact_ns("Jared", "likes", "Rust", Some(&[1.0, 0.0]), &[], None, None, None, "ns-a").unwrap();
+        store.remember_fact_ns("Alice", "likes", "Python", Some(&[0.0, 1.0]), &[], None, None, None, "ns-b").unwrap();
+
+        let memories_a = store.all_memories_with_text_ns("ns-a").unwrap();
+        let memories_b = store.all_memories_with_text_ns("ns-b").unwrap();
+        assert_eq!(memories_a.len(), 1);
+        assert_eq!(memories_b.len(), 1);
+        assert_ne!(memories_a[0].0.id, memories_b[0].0.id);
+    }
+
+    #[test]
+    fn namespace_upsert_scoped() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.upsert_fact_ns("Jared", "color", "blue", None, &[], None, None, None, "ns-a").unwrap();
+        store.upsert_fact_ns("Jared", "color", "red", None, &[], None, None, None, "ns-b").unwrap();
+
+        // Both should exist (different namespaces)
+        let all_a = store.all_memories_ns("ns-a").unwrap();
+        let all_b = store.all_memories_ns("ns-b").unwrap();
+        assert_eq!(all_a.len(), 1);
+        assert_eq!(all_b.len(), 1);
+        if let MemoryKind::Fact(f) = &all_a[0].kind { assert_eq!(f.object, "blue"); } else { panic!(); }
+        if let MemoryKind::Fact(f) = &all_b[0].kind { assert_eq!(f.object, "red"); } else { panic!(); }
+
+        // Upsert within ns-a should update only ns-a
+        store.upsert_fact_ns("Jared", "color", "green", None, &[], None, None, None, "ns-a").unwrap();
+        let all_a = store.all_memories_ns("ns-a").unwrap();
+        assert_eq!(all_a.len(), 1);
+        if let MemoryKind::Fact(f) = &all_a[0].kind { assert_eq!(f.object, "green"); } else { panic!(); }
+        // ns-b unchanged
+        let all_b = store.all_memories_ns("ns-b").unwrap();
+        if let MemoryKind::Fact(f) = &all_b[0].kind { assert_eq!(f.object, "red"); } else { panic!(); }
+    }
+
+    // ── Security: Audit log tests ───────────────────────────
+
+    #[test]
+    fn audit_log_records_remember() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        db.remember_fact("Jared", "likes", "Rust").unwrap();
+
+        let log = db.audit_log(10, None, None).unwrap();
+        assert!(!log.is_empty(), "audit log should have entries");
+        assert!(log.iter().any(|e| e.action == "remember"), "should have a remember action");
+    }
+
+    #[test]
+    fn audit_log_records_forget() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        let mem = db.remember_fact("Jared", "likes", "Rust").unwrap();
+        db.forget_by_id(&mem.id.to_string()).unwrap();
+
+        let log = db.audit_log(10, None, None).unwrap();
+        assert!(log.iter().any(|e| e.action == "forget"), "should have a forget action");
+    }
+
+    #[test]
+    fn audit_log_filter_by_memory_id() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        let m1 = db.remember_fact("A", "B", "C").unwrap();
+        db.remember_fact("D", "E", "F").unwrap();
+
+        let log = db.audit_log(10, Some(m1.id), None).unwrap();
+        for entry in &log {
+            assert_eq!(entry.memory_id, Some(m1.id));
+        }
+    }
+
+    // ── Security: Checksum & verify tests ───────────────────
+
+    #[test]
+    fn checksum_stored_on_remember() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let id = store.remember_fact("Jared", "likes", "Rust", None).unwrap();
+        let mem = store.get_memory(id).unwrap().unwrap();
+        assert!(mem.checksum.is_some(), "checksum should be set on remember");
+    }
+
+    #[test]
+    fn verify_passes_for_clean_data() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        db.remember_fact("Jared", "likes", "Rust").unwrap();
+        db.remember_episode("had coffee").unwrap();
+
+        let result = db.verify().unwrap();
+        assert_eq!(result.total_checked, 2);
+        assert_eq!(result.valid, 2);
+        assert!(result.corrupted.is_empty());
+        assert_eq!(result.missing_checksum, 0);
+    }
+
+    #[test]
+    fn verify_detects_corruption() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        let mem = db.remember_fact("Jared", "likes", "Rust").unwrap();
+
+        // Corrupt the data by changing the object directly in SQL
+        db.store().conn().execute(
+            "UPDATE memories SET object = 'Python' WHERE id = ?1",
+            rusqlite::params![mem.id],
+        ).unwrap();
+
+        let result = db.verify().unwrap();
+        assert_eq!(result.corrupted.len(), 1);
+        assert_eq!(result.corrupted[0].id, mem.id);
+    }
+
+    #[test]
+    fn verify_reports_missing_checksums() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact("Jared", "likes", "Rust", None).unwrap();
+        // Null out the checksum directly
+        store.conn().execute("UPDATE memories SET checksum = NULL", []).unwrap();
+
+        let result = store.verify_integrity().unwrap();
+        assert_eq!(result.missing_checksum, 1);
     }
 }

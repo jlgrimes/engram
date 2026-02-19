@@ -32,6 +32,7 @@ struct RecallParams {
     limit: Option<usize>,
     kind: Option<String>,
     explain: Option<bool>,
+    diagnostics: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -105,6 +106,14 @@ struct MemoryResponse {
     temporal_boost: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     final_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bm25_hits: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vector_hits: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fused_candidates: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filtered_memories: Option<usize>,
     created_at: String,
     last_accessed_at: String,
     access_count: i64,
@@ -120,6 +129,7 @@ impl From<RecallResult> for MemoryResponse {
             MemoryKind::Episode(e) => ("episode".into(), e.text.clone()),
         };
         let explanation = r.explanation;
+        let diagnostics = r.diagnostics;
         MemoryResponse {
             id: r.memory.id,
             namespace: r.memory.namespace.clone(),
@@ -134,6 +144,10 @@ impl From<RecallResult> for MemoryResponse {
             activation_boost: explanation.as_ref().map(|e| e.activation_boost),
             temporal_boost: explanation.as_ref().map(|e| e.temporal_boost),
             final_score: explanation.as_ref().map(|e| e.final_score),
+            bm25_hits: diagnostics.as_ref().map(|d| d.bm25_hits),
+            vector_hits: diagnostics.as_ref().map(|d| d.vector_hits),
+            fused_candidates: diagnostics.as_ref().map(|d| d.fused_candidates),
+            filtered_memories: diagnostics.as_ref().map(|d| d.filtered_memories),
             created_at: r.memory.created_at.to_rfc3339(),
             last_accessed_at: r.memory.last_accessed_at.to_rfc3339(),
             access_count: r.memory.access_count,
@@ -236,6 +250,7 @@ impl ConchServer {
                     kind,
                     RecallOptions {
                         explain: p.explain.unwrap_or(false),
+                        diagnostics: p.diagnostics.unwrap_or(false),
                     },
                 )
                 .map_err(|e| e.to_string())

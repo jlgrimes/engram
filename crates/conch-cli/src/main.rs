@@ -36,6 +36,8 @@ enum Command {
         kind: RecallKindArg,
         #[arg(long)]
         explain: bool,
+        #[arg(long)]
+        diagnostics: bool,
     },
     /// Delete memories
     Forget {
@@ -155,19 +157,35 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
             limit,
             kind,
             explain,
+            diagnostics,
         } => {
             let results = db.recall_filtered_in_with_options(
                 &cli.namespace,
                 query,
                 *limit,
                 (*kind).into(),
-                RecallOptions { explain: *explain },
+                RecallOptions {
+                    explain: *explain,
+                    diagnostics: *diagnostics,
+                },
             )?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else if !cli.quiet {
                 if results.is_empty() {
                     println!("No memories found.");
+                }
+                if *diagnostics {
+                    if let Some(diag) = results.first().and_then(|r| r.diagnostics.as_ref()) {
+                        println!(
+                            "diagnostics: bm25_hits={} vector_hits={} fused_candidates={} filtered_memories={}",
+                            diag.bm25_hits, diag.vector_hits, diag.fused_candidates, diag.filtered_memories
+                        );
+                    } else {
+                        println!(
+                            "diagnostics: bm25_hits=0 vector_hits=0 fused_candidates=0 filtered_memories=0"
+                        );
+                    }
                 }
                 for r in &results {
                     match &r.memory.kind {
@@ -329,6 +347,7 @@ mod tests {
                 limit: 10,
                 kind: RecallKindArg::Fact,
                 explain: false,
+                diagnostics: false,
             },
         };
         run(&recall_fact_cli, &db).unwrap();

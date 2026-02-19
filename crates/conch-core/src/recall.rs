@@ -24,6 +24,16 @@ pub struct RecallResult {
     pub score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<RecallScoreExplanation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<RecallDiagnostics>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecallDiagnostics {
+    pub bm25_hits: usize,
+    pub vector_hits: usize,
+    pub fused_candidates: usize,
+    pub filtered_memories: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -40,6 +50,7 @@ pub struct RecallScoreExplanation {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RecallOptions {
     pub explain: bool,
+    pub diagnostics: bool,
 }
 
 /// Overfetch multiplier for candidate reranking.
@@ -164,6 +175,12 @@ pub fn recall_with_filter_in_options(
 
     // RRF fusion
     let fused = rrf(&bm25_ranked, &vector_ranked);
+    let diagnostics = options.diagnostics.then_some(RecallDiagnostics {
+        bm25_hits: bm25_ranked.len(),
+        vector_hits: vector_ranked.len(),
+        fused_candidates: fused.len(),
+        filtered_memories: filtered_memories.len(),
+    });
 
     // Overfetch candidates, then rerank with full score (including decay,
     // recency, and access weighting) to avoid top-K cutoff errors.
@@ -191,6 +208,7 @@ pub fn recall_with_filter_in_options(
                 memory: mem.clone(),
                 score: base_score,
                 explanation,
+                diagnostics: diagnostics.clone(),
             }
         })
         .collect();
@@ -517,16 +535,19 @@ mod tests {
                 memory: make_fact_record(1, "Jared", "has_pet", "Tortellini"),
                 score: 1.0,
                 explanation: None,
+                diagnostics: None,
             },
             RecallResult {
                 memory: make_fact_record(2, "Tortellini", "is_a", "dog"),
                 score: 0.1, // low initial score
                 explanation: None,
+                diagnostics: None,
             },
             RecallResult {
                 memory: make_fact_record(3, "Abby", "likes", "cats"),
                 score: 0.1, // unrelated
                 explanation: None,
+                diagnostics: None,
             },
         ];
 
@@ -555,11 +576,13 @@ mod tests {
                 memory: make_fact_record(1, "Jared", "works_at", "Microsoft"),
                 score: 0.8,
                 explanation: None,
+                diagnostics: None,
             },
             RecallResult {
                 memory: make_fact_record(2, "Microsoft", "located_in", "Seattle"),
                 score: 0.3,
                 explanation: None,
+                diagnostics: None,
             },
         ];
 
@@ -580,6 +603,7 @@ mod tests {
             memory: make_fact_record(1, "Jared", "builds", "Gen"),
             score: 1.0,
             explanation: None,
+            diagnostics: None,
         }];
 
         spread_activation(&mut results, SPREAD_FACTOR);
@@ -598,6 +622,7 @@ mod tests {
                 memory: make_timed_episode(1, "alpha anchor memory", now),
                 score: 1.0,
                 explanation: None,
+                diagnostics: None,
             },
             RecallResult {
                 memory: make_timed_episode(
@@ -607,6 +632,7 @@ mod tests {
                 ),
                 score: 0.2,
                 explanation: None,
+                diagnostics: None,
             },
             RecallResult {
                 memory: make_timed_episode(
@@ -616,6 +642,7 @@ mod tests {
                 ),
                 score: 0.2,
                 explanation: None,
+                diagnostics: None,
             },
         ];
 
@@ -645,6 +672,7 @@ mod tests {
                 memory: make_timed_episode(1, "alpha anchor", now),
                 score: 1.0,
                 explanation: None,
+                diagnostics: None,
             },
             RecallResult {
                 memory: make_timed_episode(
@@ -654,11 +682,13 @@ mod tests {
                 ),
                 score: 0.1,
                 explanation: None,
+                diagnostics: None,
             },
             RecallResult {
                 memory: make_timed_episode(3, "alpha further", now - chrono::Duration::minutes(25)),
                 score: 0.1,
                 explanation: None,
+                diagnostics: None,
             },
         ];
 
@@ -844,7 +874,10 @@ mod tests {
             &MockEmbedder,
             5,
             RecallKindFilter::All,
-            RecallOptions { explain: true },
+            RecallOptions {
+                explain: true,
+                diagnostics: false,
+            },
         )
         .unwrap();
 
@@ -868,6 +901,71 @@ mod tests {
         let results = recall(&store, "alpha", &MockEmbedder, 5).unwrap();
         assert!(!results.is_empty());
         assert!(results.iter().all(|r| r.explanation.is_none()));
+    }
+
+    #[test]
+    fn recall_diagnostics_present_only_when_enabled() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .remember_episode("alpha diagnostics memory", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        let default_results = recall(&store, "alpha", &MockEmbedder, 5).unwrap();
+        assert!(!default_results.is_empty());
+        assert!(default_results.iter().all(|r| r.diagnostics.is_none()));
+
+        let diagnostics_results = recall_with_filter_in_options(
+            &store,
+            DEFAULT_NAMESPACE,
+            "alpha",
+            &MockEmbedder,
+            5,
+            RecallKindFilter::All,
+            RecallOptions {
+                explain: false,
+                diagnostics: true,
+            },
+        )
+        .unwrap();
+        assert!(!diagnostics_results.is_empty());
+        assert!(diagnostics_results.iter().all(|r| r.diagnostics.is_some()));
+    }
+
+    #[test]
+    fn recall_diagnostics_values_are_sensible() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .remember_episode("alpha diagnostics one", Some(&[1.0, 0.0]))
+            .unwrap();
+        store
+            .remember_episode("alpha diagnostics two", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        let diagnostics_results = recall_with_filter_in_options(
+            &store,
+            DEFAULT_NAMESPACE,
+            "alpha",
+            &MockEmbedder,
+            5,
+            RecallKindFilter::All,
+            RecallOptions {
+                explain: true,
+                diagnostics: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!diagnostics_results.is_empty());
+        let d = diagnostics_results[0]
+            .diagnostics
+            .as_ref()
+            .expect("diagnostics should be present when diagnostics=true");
+        assert!(d.filtered_memories >= diagnostics_results.len());
+        assert!(d.filtered_memories > 0);
+        assert!(d.bm25_hits > 0);
+        assert!(d.vector_hits > 0);
+        assert!(d.fused_candidates > 0);
+        assert!(diagnostics_results.iter().all(|r| r.explanation.is_some()));
     }
 
     // ── Original tests ───────────────────────────────────────

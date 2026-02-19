@@ -47,6 +47,10 @@ Agent → conch recall "where does Jared work?"
 Agent → conch recall "where does Jared work?" --explain
         → [fact] Jared works at Microsoft (score: 0.847)
           ↳ explain: rrf=0.03226 decayed=1.000 recency=0.998 access=1.000 activation=0.00000 temporal=0.00000 final=0.84700
+
+Agent → conch recall "where does Jared work?" --diagnostics
+        → diagnostics: bm25_hits=42 vector_hits=31 fused_candidates=48 filtered_memories=120
+          [fact] Jared works at Microsoft (score: 0.847)
 ```
 
 - **Facts** — subject-relation-object triples
@@ -112,7 +116,9 @@ conch recall <query> --kind all                                   # search facts
 conch recall <query> --kind fact                                  # search only facts
 conch recall <query> --kind episode                               # search only episodes
 conch recall <query> --explain                                    # include score breakdown in output
-conch recall <query> --json --explain                             # include explanation fields in JSON
+conch recall <query> --diagnostics                                # include retrieval diagnostics counters
+conch recall <query> --json --diagnostics                         # include diagnostics fields in JSON
+conch recall <query> --json --explain --diagnostics               # include both explanation + diagnostics in JSON
 conch --namespace team-a forget --id <id>                         # delete by ID
 conch --namespace team-a forget --subject <name>                  # delete by subject
 conch --namespace team-a forget --older-than <duration>           # prune old (e.g. 30d)

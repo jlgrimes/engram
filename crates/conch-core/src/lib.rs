@@ -9,8 +9,9 @@ pub use decay::{run_decay, run_decay_in, DecayResult};
 pub use embed::{cosine_similarity, EmbedError, Embedder, FastEmbedder, SharedEmbedder};
 pub use memory::{Episode, ExportData, Fact, MemoryKind, MemoryRecord, MemoryStats};
 pub use recall::{
-    recall, recall_with_filter, recall_with_filter_in, recall_with_filter_in_options, RecallError,
-    RecallKindFilter, RecallOptions, RecallResult, RecallScoreExplanation,
+    recall, recall_with_filter, recall_with_filter_in, recall_with_filter_in_options,
+    RecallDiagnostics, RecallError, RecallKindFilter, RecallOptions, RecallResult,
+    RecallScoreExplanation,
 };
 pub use store::{MemoryStore, DEFAULT_NAMESPACE};
 
@@ -192,7 +193,29 @@ impl ConchDB {
             query,
             limit,
             kind,
-            recall::RecallOptions { explain: true },
+            recall::RecallOptions {
+                explain: true,
+                diagnostics: false,
+            },
+        )
+    }
+
+    pub fn recall_explain_diagnostics_in(
+        &self,
+        namespace: &str,
+        query: &str,
+        limit: usize,
+        kind: RecallKindFilter,
+    ) -> Result<Vec<RecallResult>, ConchError> {
+        self.recall_filtered_in_with_options(
+            namespace,
+            query,
+            limit,
+            kind,
+            recall::RecallOptions {
+                explain: true,
+                diagnostics: true,
+            },
         )
     }
 
@@ -496,6 +519,20 @@ mod tests {
             let ex = r.explanation.unwrap();
             assert!((ex.final_score - r.score).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn recall_explain_diagnostics_in_populates_both_payloads() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+        db.remember_episode("alpha explain diagnostics via conch db")
+            .unwrap();
+
+        let results = db
+            .recall_explain_diagnostics_in(DEFAULT_NAMESPACE, "alpha", 5, RecallKindFilter::All)
+            .unwrap();
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|r| r.explanation.is_some()));
+        assert!(results.iter().all(|r| r.diagnostics.is_some()));
     }
 
     #[test]

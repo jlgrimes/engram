@@ -173,7 +173,10 @@ impl ConchServer {
     }
 
     fn namespace_or_default<'a>(&'a self, namespace: Option<&'a str>) -> &'a str {
-        namespace.unwrap_or(self.default_namespace.as_str())
+        match namespace.map(str::trim) {
+            Some(ns) if !ns.is_empty() => ns,
+            _ => self.default_namespace.as_str(),
+        }
     }
 
     async fn with_conch_blocking<R, F>(&self, f: F) -> Result<Result<R, CallToolResult>, McpError>
@@ -491,6 +494,8 @@ mod tests {
 
         assert_eq!(server.namespace_or_default(None), "team-a");
         assert_eq!(server.namespace_or_default(Some("team-b")), "team-b");
+        assert_eq!(server.namespace_or_default(Some("")), "team-a");
+        assert_eq!(server.namespace_or_default(Some("   \t\n  ")), "team-a");
     }
 
     #[tokio::test]
@@ -537,6 +542,37 @@ mod tests {
         let value = tool_result_json_text(&result);
         assert_eq!(value["namespace"], "team-a");
         assert!(value["id"].is_number());
+    }
+
+    #[tokio::test]
+    async fn remember_fact_blank_namespace_uses_default_namespace() {
+        let db = ConchDB::open_in_memory_with(Box::new(NoopEmbedder)).expect("db");
+        let server = ConchServer::new(db, "default-ns".to_string());
+
+        let blank = server
+            .remember_fact(Parameters(RememberFactParams {
+                namespace: Some("".to_string()),
+                subject: "sky".to_string(),
+                relation: "is".to_string(),
+                object: "blue".to_string(),
+            }))
+            .await
+            .expect("blank namespace call should succeed");
+
+        let whitespace = server
+            .remember_fact(Parameters(RememberFactParams {
+                namespace: Some("   \n\t   ".to_string()),
+                subject: "grass".to_string(),
+                relation: "is".to_string(),
+                object: "green".to_string(),
+            }))
+            .await
+            .expect("whitespace namespace call should succeed");
+
+        let blank_json = tool_result_json_text(&blank);
+        let whitespace_json = tool_result_json_text(&whitespace);
+        assert_eq!(blank_json["namespace"], "default-ns");
+        assert_eq!(whitespace_json["namespace"], "default-ns");
     }
 
     #[tokio::test]

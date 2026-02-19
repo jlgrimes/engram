@@ -79,6 +79,24 @@ enum Command {
     Export,
     /// Import memories from JSON on stdin
     Import,
+    /// Consolidate related memories (sleep-like memory consolidation)
+    Consolidate {
+        /// Preview what would be consolidated without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show or set importance scores for memories
+    Importance {
+        /// Set importance for a specific memory ID
+        #[arg(long)]
+        id: Option<i64>,
+        /// Importance value to set (0.0-1.0)
+        #[arg(long)]
+        set: Option<f64>,
+        /// Recompute importance scores for all memories
+        #[arg(long)]
+        score: bool,
+    },
 }
 
 fn default_db_path() -> String {
@@ -217,6 +235,61 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
             if cli.json { println!("{}", serde_json::json!({ "imported": count })); }
             else if !cli.quiet { println!("Imported {count} memories."); }
         }
+        Command::Consolidate { dry_run } => {
+            if *dry_run {
+                let clusters = db.consolidate_clusters()?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&clusters)?);
+                } else if !cli.quiet {
+                    if clusters.is_empty() {
+                        println!("No clusters found for consolidation.");
+                    } else {
+                        println!("Found {} cluster(s) (dry run — no changes made):", clusters.len());
+                        for (i, cluster) in clusters.iter().enumerate() {
+                            println!("\n  Cluster {}:", i + 1);
+                            println!("    Canonical: [id:{}] {} (str: {:.2})", cluster.canonical.id, cluster.canonical.text_for_embedding(), cluster.canonical.strength);
+                            for dup in &cluster.duplicates {
+                                println!("    Duplicate: [id:{}] {} (str: {:.2})", dup.id, dup.text_for_embedding(), dup.strength);
+                            }
+                        }
+                    }
+                }
+            } else {
+                let result = db.consolidate(false)?;
+                if cli.json { println!("{}", serde_json::to_string_pretty(&result)?); }
+                else if !cli.quiet {
+                    println!("Consolidated {} cluster(s): {} memories archived, {} canonical memories boosted.", result.clusters, result.archived, result.boosted);
+                }
+            }
+        }
+        Command::Importance { id, set, score } => {
+            if let (Some(mem_id), Some(value)) = (id, set) {
+                db.set_importance(*mem_id, *value)?;
+                if cli.json { println!("{}", serde_json::json!({ "id": mem_id, "importance": value })); }
+                else if !cli.quiet { println!("Set importance for memory {mem_id} to {value:.2}"); }
+            } else if *score {
+                let count = db.score_importance()?;
+                if cli.json { println!("{}", serde_json::json!({ "scored": count })); }
+                else if !cli.quiet { println!("Recomputed importance for {count} memories."); }
+            } else {
+                let infos = db.list_importance()?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&infos)?);
+                } else if !cli.quiet {
+                    if infos.is_empty() { println!("No memories found."); }
+                    for info in &infos {
+                        println!("[id:{}] importance: {:.3} | accesses: {} | tags: {} | source: {} | {}",
+                            info.id, info.importance, info.access_count, info.tag_count,
+                            if info.has_source { "yes" } else { "no" },
+                            truncate(&info.content, 60));
+                    }
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max { s.to_string() } else { format!("{}...", &s[..max]) }
 }

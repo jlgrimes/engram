@@ -65,6 +65,15 @@ impl MemoryStore {
                  ALTER TABLE memories ADD COLUMN channel TEXT;"
             )?;
         }
+        // Migration: add importance column if missing
+        let has_importance: bool = self.conn
+            .prepare("SELECT importance FROM memories LIMIT 0")
+            .is_ok();
+        if !has_importance {
+            self.conn.execute_batch(
+                "ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5;"
+            )?;
+        }
         Ok(())
     }
 
@@ -161,7 +170,7 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count,
-                    tags, source, session_id, channel
+                    tags, source, session_id, channel, importance
              FROM memories WHERE strength > 0.01",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -177,7 +186,7 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count,
-                    tags, source, session_id, channel
+                    tags, source, session_id, channel, importance
              FROM memories WHERE strength > 0.01 AND tags LIKE ?1",
         )?;
         let rows = stmt.query_map(params![pattern], |row| {
@@ -202,7 +211,7 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count,
-                    tags, source, session_id, channel
+                    tags, source, session_id, channel, importance
              FROM memories WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_memory)?;
@@ -217,19 +226,22 @@ impl MemoryStore {
     pub fn decay_all(&self, decay_factor: f64, half_life_hours: f64) -> SqlResult<usize> {
         let now = Utc::now();
         let mut stmt = self.conn.prepare(
-            "SELECT id, last_accessed_at, strength FROM memories WHERE strength > 0.01",
+            "SELECT id, last_accessed_at, strength, importance FROM memories WHERE strength > 0.01",
         )?;
-        let rows: Vec<(i64, String, f64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        let rows: Vec<(i64, String, f64, f64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, Option<f64>>(3)?.unwrap_or(0.5))))?
             .collect::<SqlResult<Vec<_>>>()?;
 
         let mut count = 0;
-        for (id, last_accessed, strength) in &rows {
+        for (id, last_accessed, strength, importance) in &rows {
             let last = DateTime::parse_from_rfc3339(last_accessed)
                 .unwrap_or_else(|_| now.into())
                 .with_timezone(&Utc);
             let hours = (now - last).num_seconds() as f64 / 3600.0;
-            let new_strength = (strength * decay_factor.powf(hours / half_life_hours)).max(0.0);
+            // Importance slows decay: effective_half_life = base_half_life * (1 + importance)
+            // importance=0 → half_life*1, importance=1 → half_life*2
+            let effective_half_life = half_life_hours * (1.0 + importance);
+            let new_strength = (strength * decay_factor.powf(hours / effective_half_life)).max(0.0);
             if (new_strength - strength).abs() > 1e-6 {
                 self.conn.execute("UPDATE memories SET strength = ?1 WHERE id = ?2", params![new_strength, id])?;
                 count += 1;
@@ -260,7 +272,7 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count,
-                    tags, source, session_id, channel
+                    tags, source, session_id, channel, importance
              FROM memories WHERE embedding IS NULL",
         )?;
         let rows = stmt.query_map([], row_to_memory)?;
@@ -278,7 +290,7 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count,
-                    tags, source, session_id, channel
+                    tags, source, session_id, channel, importance
              FROM memories",
         )?;
         let rows = stmt.query_map([], row_to_memory)?;
@@ -323,6 +335,33 @@ impl MemoryStore {
         self.conn.execute(
             "UPDATE memories SET tags = ?1 WHERE id = ?2",
             params![tags_str, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update the importance score of a memory.
+    pub fn update_importance(&self, id: i64, importance: f64) -> SqlResult<()> {
+        self.conn.execute(
+            "UPDATE memories SET importance = ?1 WHERE id = ?2",
+            params![importance.clamp(0.0, 1.0), id],
+        )?;
+        Ok(())
+    }
+
+    /// Set strength to zero (archive) for a memory.
+    pub fn archive_memory(&self, id: i64) -> SqlResult<()> {
+        self.conn.execute(
+            "UPDATE memories SET strength = 0.0 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a memory by numeric ID.
+    pub fn delete_memory(&self, id: i64) -> SqlResult<()> {
+        self.conn.execute(
+            "DELETE FROM memories WHERE id = ?1",
+            params![id],
         )?;
         Ok(())
     }
@@ -671,5 +710,6 @@ fn row_to_memory(row: &rusqlite::Row) -> SqlResult<MemoryRecord> {
         source: row.get::<_, Option<String>>(12)?,
         session_id: row.get::<_, Option<String>>(13)?,
         channel: row.get::<_, Option<String>>(14)?,
+        importance: row.get::<_, Option<f64>>(15)?.unwrap_or(0.5),
     })
 }

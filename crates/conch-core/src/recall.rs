@@ -286,7 +286,10 @@ fn effective_strength(mem: &MemoryRecord, now: chrono::DateTime<Utc>) -> f64 {
     let elapsed_secs = (now - mem.last_accessed_at).num_seconds().max(0) as f64;
     let elapsed_days = elapsed_secs / 86_400.0;
     let lambda = kind_decay_lambda_per_day(mem);
-    (mem.strength * (-lambda * elapsed_days).exp()).clamp(0.0, 1.0)
+    // Importance slows decay: effective_lambda = lambda / (1 + importance)
+    // importance=0 → full decay, importance=1 → half the decay rate
+    let effective_lambda = lambda / (1.0 + mem.importance);
+    (mem.strength * (-effective_lambda * elapsed_days).exp()).clamp(0.0, 1.0)
 }
 
 fn bm25_search(query: &str, memories: &[(MemoryRecord, String)]) -> Vec<(usize, f32)> {
@@ -722,6 +725,7 @@ mod tests {
             source: None,
             session_id: None,
             channel: None,
+            importance: 0.5,
         }
     }
 
@@ -740,6 +744,7 @@ mod tests {
             source: None,
             session_id: None,
             channel: None,
+            importance: 0.5,
         }
     }
 

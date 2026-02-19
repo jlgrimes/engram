@@ -36,6 +36,12 @@ pub struct MemoryRecord {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    #[serde(default = "default_importance")]
+    pub importance: f64,
+}
+
+fn default_importance() -> f64 {
+    0.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,12 +3,16 @@ pub mod store;
 pub mod embed;
 pub mod decay;
 pub mod recall;
+pub mod consolidate;
+pub mod importance;
 
 pub use memory::{Episode, ExportData, Fact, MemoryKind, MemoryRecord, MemoryStats, RememberResult};
 pub use store::MemoryStore;
 pub use embed::{Embedder, EmbedError, FastEmbedder, SharedEmbedder, cosine_similarity};
 pub use decay::{run_decay, DecayResult};
 pub use recall::{recall, recall_with_tag_filter, RecallResult, RecallError};
+pub use consolidate::{consolidate, find_clusters, ConsolidateResult, ConsolidateCluster};
+pub use importance::{compute_importance, score_all as score_importance, list_importance, ImportanceInfo};
 
 use chrono::Duration;
 
@@ -248,6 +252,36 @@ impl ConchDB {
     pub fn export(&self) -> Result<ExportData, ConchError> {
         let memories = self.store.all_memories()?;
         Ok(ExportData { memories })
+    }
+
+    pub fn consolidate(&self, dry_run: bool) -> Result<ConsolidateResult, ConchError> {
+        if dry_run {
+            let clusters = find_clusters(&self.store, None)?;
+            Ok(ConsolidateResult {
+                clusters: clusters.len(),
+                archived: clusters.iter().map(|c| c.duplicates.len()).sum(),
+                boosted: clusters.len(),
+            })
+        } else {
+            Ok(consolidate::consolidate(&self.store, None)?)
+        }
+    }
+
+    pub fn consolidate_clusters(&self) -> Result<Vec<ConsolidateCluster>, ConchError> {
+        Ok(find_clusters(&self.store, None)?)
+    }
+
+    pub fn score_importance(&self) -> Result<usize, ConchError> {
+        Ok(importance::score_all(&self.store)?)
+    }
+
+    pub fn list_importance(&self) -> Result<Vec<ImportanceInfo>, ConchError> {
+        Ok(importance::list_importance(&self.store)?)
+    }
+
+    pub fn set_importance(&self, id: i64, importance: f64) -> Result<(), ConchError> {
+        self.store.update_importance(id, importance)?;
+        Ok(())
     }
 
     pub fn import(&self, data: &ExportData) -> Result<usize, ConchError> {

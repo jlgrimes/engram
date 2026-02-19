@@ -49,7 +49,10 @@ mod tests {
     #[test]
     fn test_decay_pass() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.remember_fact("A", "is", "B", None).unwrap();
+        let id = store.remember_fact("A", "is", "B", None).unwrap();
+
+        // Set importance to 0 so we get the base half-life of 24h
+        store.update_importance(id, 0.0).unwrap();
 
         // Manually set last_accessed_at to 48 hours ago
         let old_time = (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
@@ -81,6 +84,39 @@ mod tests {
 
         let mem = store.get_memory(1).unwrap().unwrap();
         assert!((mem.strength - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_decay_respects_importance() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let id_low = store.remember_fact("low", "importance", "mem", None).unwrap();
+        let id_high = store.remember_fact("high", "importance", "mem", None).unwrap();
+
+        // Set importance: low=0.0, high=1.0
+        store.update_importance(id_low, 0.0).unwrap();
+        store.update_importance(id_high, 1.0).unwrap();
+
+        // Set both to 48 hours ago
+        let old_time = (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET last_accessed_at = ?1",
+                rusqlite::params![old_time],
+            )
+            .unwrap();
+
+        let _result = run_decay(&store, None, None).unwrap();
+
+        let low = store.get_memory(id_low).unwrap().unwrap();
+        let high = store.get_memory(id_high).unwrap().unwrap();
+
+        // High importance memory should retain more strength
+        assert!(
+            high.strength > low.strength,
+            "high importance ({:.4}) should decay slower than low importance ({:.4})",
+            high.strength, low.strength
+        );
     }
 
     #[test]

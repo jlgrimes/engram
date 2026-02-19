@@ -52,6 +52,26 @@ struct ForgetParams {
     older_than_secs: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ConsolidateParams {
+    /// If true, only preview what would be consolidated without making changes
+    dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ImportanceSetParams {
+    /// Memory ID to set importance for
+    id: i64,
+    /// Importance value (0.0-1.0)
+    importance: f64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ImportanceScoreParams {
+    /// If true, recompute importance scores for all memories
+    recompute: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 struct MemoryResponse {
     id: i64,
@@ -195,6 +215,61 @@ impl ConchServer {
         let conch = self.conch.lock().unwrap();
         match conch.stats() {
             Ok(stats) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&stats).unwrap())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(name = "consolidate", description = "Consolidate related memories (sleep-like memory consolidation). Finds clusters of similar memories, boosts the strongest, and archives duplicates.")]
+    async fn consolidate(&self, params: Parameters<ConsolidateParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let dry_run = p.dry_run.unwrap_or(false);
+        let conch = self.conch.lock().unwrap();
+        if dry_run {
+            match conch.consolidate_clusters() {
+                Ok(clusters) => Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&clusters).unwrap(),
+                )])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            }
+        } else {
+            match conch.consolidate(false) {
+                Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&result).unwrap(),
+                )])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            }
+        }
+    }
+
+    #[tool(name = "importance", description = "Show or recompute importance scores for all memories. Importance affects decay rate — high-importance memories decay slower.")]
+    async fn importance(&self, params: Parameters<ImportanceScoreParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let conch = self.conch.lock().unwrap();
+        if p.recompute.unwrap_or(false) {
+            match conch.score_importance() {
+                Ok(count) => Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::json!({ "recomputed": count }).to_string(),
+                )])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            }
+        } else {
+            match conch.list_importance() {
+                Ok(infos) => Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&infos).unwrap(),
+                )])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            }
+        }
+    }
+
+    #[tool(name = "set_importance", description = "Set the importance score for a specific memory. Importance (0.0-1.0) affects decay rate — high-importance memories decay slower.")]
+    async fn set_importance(&self, params: Parameters<ImportanceSetParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let conch = self.conch.lock().unwrap();
+        match conch.set_importance(p.id, p.importance) {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::json!({ "id": p.id, "importance": p.importance }).to_string(),
+            )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }

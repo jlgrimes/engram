@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "conch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "conch-core",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "conch-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bm25",
  "chrono",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "conch-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "conch-core",
  "rmcp",

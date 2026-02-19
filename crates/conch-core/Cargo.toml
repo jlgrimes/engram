@@ -1,7 +1,15 @@
 [package]
 name = "conch-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "Biological memory engine for AI agents — memories strengthen with use, fade with time"
+license = "MIT"
+repository = "https://github.com/jlgrimes/conch"
+homepage = "https://github.com/jlgrimes/conch"
+readme = "../../README.md"
+authors = ["Jared Grimes"]
+keywords = ["memory", "ai-agent", "semantic-search", "biological-memory", "sqlite"]
+categories = ["database", "science"]
 
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }

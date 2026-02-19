@@ -1,16 +1,22 @@
 [package]
 name = "conch-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "MCP server for conch — biological memory for AI agents"
 license = "MIT"
+repository = "https://github.com/jlgrimes/conch"
+homepage = "https://github.com/jlgrimes/conch"
+readme = "../../README.md"
+authors = ["Jared Grimes"]
+keywords = ["memory", "ai-agent", "mcp", "model-context-protocol"]
+categories = ["database"]
 
 [[bin]]
 name = "conch-mcp"
 path = "src/main.rs"
 
 [dependencies]
-conch-core = { path = "../conch-core" }
+conch-core = { version = "0.2.0", path = "../conch-core" }
 rmcp = { version = "0.15", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

@@ -477,3 +477,75 @@ fn row_to_memory(row: &rusqlite::Row) -> SqlResult<MemoryRecord> {
         access_count: row.get(11)?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn open_migrates_legacy_schema_without_namespace_and_preserves_access() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO memories (kind, subject, relation, object, strength, created_at, last_accessed_at, access_count)
+                VALUES ('fact', 'Legacy', 'uses', 'schema', 0.8, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 2);",
+            )
+            .unwrap();
+        }
+
+        let store = MemoryStore::open(path).unwrap();
+
+        let namespace_info: (String, i64, String) = store
+            .conn()
+            .query_row(
+                "SELECT name, `notnull`, dflt_value FROM pragma_table_info('memories') WHERE name = 'namespace'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(namespace_info.0, "namespace");
+        assert_eq!(namespace_info.1, 1);
+        assert_eq!(namespace_info.2, "'default'");
+
+        let rows_with_default_ns: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE namespace = 'default'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows_with_default_ns, 1);
+
+        let memory = store
+            .find_fact_in(DEFAULT_NAMESPACE, "Legacy", "uses", "schema")
+            .unwrap()
+            .expect("legacy row should be accessible in default namespace");
+        assert_eq!(memory.namespace, DEFAULT_NAMESPACE);
+        assert!((memory.strength - 0.8).abs() < 1e-6);
+
+        let default_stats = store.stats_in(DEFAULT_NAMESPACE).unwrap();
+        assert_eq!(default_stats.total_memories, 1);
+
+        let other_stats = store.stats_in("other").unwrap();
+        assert_eq!(other_stats.total_memories, 0);
+    }
+}

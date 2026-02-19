@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use conch_core::{memory::MemoryKind, ConchDB, RecallKindFilter};
-use std::io;
+use std::io::{self, Read};
 
 #[derive(Parser)]
 #[command(name = "conch", about = "Biological memory for AI agents")]
@@ -115,6 +115,17 @@ fn main() {
     }
 }
 
+fn import_from_reader(
+    db: &ConchDB,
+    namespace: &str,
+    mut reader: impl Read,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut input = String::new();
+    reader.read_to_string(&mut input)?;
+    let data: conch_core::ExportData = serde_json::from_str(&input)?;
+    Ok(db.import_into(namespace, &data)?)
+}
+
 fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
     match &cli.command {
         Command::Remember {
@@ -220,9 +231,7 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&data)?);
         }
         Command::Import => {
-            let input = std::io::read_to_string(io::stdin())?;
-            let data: conch_core::ExportData = serde_json::from_str(&input)?;
-            let count = db.import_into(&cli.namespace, &data)?;
+            let count = import_from_reader(db, &cli.namespace, io::stdin())?;
             if cli.json {
                 println!("{}", serde_json::json!({ "imported": count }));
             } else if !cli.quiet {
@@ -231,4 +240,109 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use conch_core::embed::{EmbedError, Embedder, Embedding};
+
+    struct MockEmbedder;
+
+    impl Embedder for MockEmbedder {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Embedding>, EmbedError> {
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            2
+        }
+    }
+
+    fn test_db() -> ConchDB {
+        ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap()
+    }
+
+    #[test]
+    fn run_remember_and_recall_kind_respect_namespace() {
+        let db = test_db();
+
+        let remember_cli = Cli {
+            db: "unused".to_string(),
+            json: false,
+            quiet: true,
+            namespace: "team-a".to_string(),
+            command: Command::Remember {
+                subject: "Jared".to_string(),
+                relation: "builds".to_string(),
+                object: "Conch".to_string(),
+            },
+        };
+        run(&remember_cli, &db).unwrap();
+
+        let remember_episode_cli = Cli {
+            db: "unused".to_string(),
+            json: false,
+            quiet: true,
+            namespace: "team-a".to_string(),
+            command: Command::RememberEpisode {
+                text: "Daily standup happened".to_string(),
+            },
+        };
+        run(&remember_episode_cli, &db).unwrap();
+
+        let recall_fact_cli = Cli {
+            db: "unused".to_string(),
+            json: false,
+            quiet: true,
+            namespace: "team-a".to_string(),
+            command: Command::Recall {
+                query: "Jared".to_string(),
+                limit: 10,
+                kind: RecallKindArg::Fact,
+            },
+        };
+        run(&recall_fact_cli, &db).unwrap();
+
+        let recall_fact_results = db
+            .recall_filtered_in("team-a", "Jared", 10, RecallKindFilter::Facts)
+            .unwrap();
+        assert!(!recall_fact_results.is_empty());
+        assert!(recall_fact_results
+            .iter()
+            .all(|r| matches!(r.memory.kind, MemoryKind::Fact(_))));
+
+        let other_namespace_results = db
+            .recall_filtered_in("team-b", "Jared", 10, RecallKindFilter::Facts)
+            .unwrap();
+        assert!(other_namespace_results.is_empty());
+    }
+
+    #[test]
+    fn export_import_namespace_roundtrip_via_command_level_helpers() {
+        let source = test_db();
+        source
+            .remember_fact_in("team-a", "Rust", "is", "great")
+            .unwrap();
+        source
+            .remember_episode_in("team-a", "incident retrospective")
+            .unwrap();
+        source
+            .remember_fact_in("team-b", "Go", "is", "fast")
+            .unwrap();
+
+        let exported = source.export_in("team-a").unwrap();
+        let json = serde_json::to_string(&exported).unwrap();
+
+        let dest = test_db();
+        let imported = import_from_reader(&dest, "team-c", std::io::Cursor::new(json)).unwrap();
+        assert_eq!(imported, 2);
+
+        let team_c = dest.export_in("team-c").unwrap();
+        assert_eq!(team_c.memories.len(), 2);
+        assert!(team_c.memories.iter().all(|m| m.namespace == "team-c"));
+
+        let team_a = dest.export_in("team-a").unwrap();
+        assert!(team_a.memories.is_empty());
+    }
 }

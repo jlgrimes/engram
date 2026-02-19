@@ -9,7 +9,8 @@ pub use decay::{run_decay, run_decay_in, DecayResult};
 pub use embed::{cosine_similarity, EmbedError, Embedder, FastEmbedder, SharedEmbedder};
 pub use memory::{Episode, ExportData, Fact, MemoryKind, MemoryRecord, MemoryStats};
 pub use recall::{
-    recall, recall_with_filter, recall_with_filter_in, RecallError, RecallKindFilter, RecallResult,
+    recall, recall_with_filter, recall_with_filter_in, recall_with_filter_in_options, RecallError,
+    RecallKindFilter, RecallOptions, RecallResult, RecallScoreExplanation,
 };
 pub use store::{MemoryStore, DEFAULT_NAMESPACE};
 
@@ -147,18 +148,52 @@ impl ConchDB {
         limit: usize,
         kind: RecallKindFilter,
     ) -> Result<Vec<RecallResult>, ConchError> {
-        recall::recall_with_filter_in(
+        self.recall_filtered_in_with_options(
+            namespace,
+            query,
+            limit,
+            kind,
+            recall::RecallOptions::default(),
+        )
+    }
+
+    pub fn recall_filtered_in_with_options(
+        &self,
+        namespace: &str,
+        query: &str,
+        limit: usize,
+        kind: RecallKindFilter,
+        options: recall::RecallOptions,
+    ) -> Result<Vec<RecallResult>, ConchError> {
+        recall::recall_with_filter_in_options(
             &self.store,
             namespace,
             query,
             self.embedder.as_ref(),
             limit,
             kind,
+            options,
         )
         .map_err(|e| match e {
             RecallError::Db(e) => ConchError::Db(e),
             RecallError::Embedding(msg) => ConchError::Embed(EmbedError::Other(msg)),
         })
+    }
+
+    pub fn recall_explain_in(
+        &self,
+        namespace: &str,
+        query: &str,
+        limit: usize,
+        kind: RecallKindFilter,
+    ) -> Result<Vec<RecallResult>, ConchError> {
+        self.recall_filtered_in_with_options(
+            namespace,
+            query,
+            limit,
+            kind,
+            recall::RecallOptions { explain: true },
+        )
     }
 
     pub fn forget_by_subject(&self, subject: &str) -> Result<usize, ConchError> {
@@ -445,6 +480,22 @@ mod tests {
         assert!(recalled
             .iter()
             .all(|r| r.memory.namespace == DEFAULT_NAMESPACE));
+    }
+
+    #[test]
+    fn recall_explain_in_populates_score_breakdown() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+        db.remember_episode("alpha explain via conch db").unwrap();
+
+        let results = db
+            .recall_explain_in(DEFAULT_NAMESPACE, "alpha", 5, RecallKindFilter::All)
+            .unwrap();
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|r| r.explanation.is_some()));
+        for r in results {
+            let ex = r.explanation.unwrap();
+            assert!((ex.final_score - r.score).abs() < 1e-9);
+        }
     }
 
     #[test]

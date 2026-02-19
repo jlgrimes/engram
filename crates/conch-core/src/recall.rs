@@ -5,8 +5,9 @@ use chrono::Utc;
 use crate::embed::{cosine_similarity, Embedder};
 use crate::memory::{MemoryKind, MemoryRecord};
 use crate::recall_scoring::{
-    access_weight, effective_strength, recency_boost, spread_activation,
-    temporal_cooccurrence_boost, touch_boost, SPREAD_FACTOR,
+    access_weight, apply_boosts, effective_strength, recency_boost, spread_activation,
+    spread_activation_boosts, temporal_cooccurrence_boost, temporal_cooccurrence_boosts,
+    touch_boost, SPREAD_FACTOR,
 };
 use crate::store::{MemoryStore, DEFAULT_NAMESPACE};
 
@@ -21,6 +22,24 @@ const RRF_K: f64 = 60.0;
 pub struct RecallResult {
     pub memory: MemoryRecord,
     pub score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<RecallScoreExplanation>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecallScoreExplanation {
+    pub rrf_score: f64,
+    pub decayed_strength: f64,
+    pub recency_boost: f64,
+    pub access_weight: f64,
+    pub activation_boost: f64,
+    pub temporal_boost: f64,
+    pub final_score: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecallOptions {
+    pub explain: bool,
 }
 
 /// Overfetch multiplier for candidate reranking.
@@ -93,6 +112,26 @@ pub fn recall_with_filter_in(
     limit: usize,
     filter: RecallKindFilter,
 ) -> Result<Vec<RecallResult>, RecallError> {
+    recall_with_filter_in_options(
+        store,
+        namespace,
+        query,
+        embedder,
+        limit,
+        filter,
+        RecallOptions::default(),
+    )
+}
+
+pub fn recall_with_filter_in_options(
+    store: &MemoryStore,
+    namespace: &str,
+    query: &str,
+    embedder: &dyn Embedder,
+    limit: usize,
+    filter: RecallKindFilter,
+    options: RecallOptions,
+) -> Result<Vec<RecallResult>, RecallError> {
     let all_memories = store
         .all_memories_with_text_in(namespace)
         .map_err(RecallError::Db)?;
@@ -138,9 +177,20 @@ pub fn recall_with_filter_in(
             let decayed_strength = effective_strength(mem, now);
             let recency = recency_boost(mem, now);
             let access = access_weight(mem, max_access);
+            let base_score = rrf_score * decayed_strength * recency * access;
+            let explanation = options.explain.then_some(RecallScoreExplanation {
+                rrf_score,
+                decayed_strength,
+                recency_boost: recency,
+                access_weight: access,
+                activation_boost: 0.0,
+                temporal_boost: 0.0,
+                final_score: base_score,
+            });
             RecallResult {
                 memory: mem.clone(),
-                score: rrf_score * decayed_strength * recency * access,
+                score: base_score,
+                explanation,
             }
         })
         .collect();
@@ -148,13 +198,34 @@ pub fn recall_with_filter_in(
     // ── Spreading activation ─────────────────────────────────
     // For each scored Fact, boost other results that share a subject or object.
     // This is 1-hop graph traversal inspired by Collins & Loftus (1975).
-    spread_activation(&mut results, SPREAD_FACTOR);
+    if options.explain {
+        let activation_boosts = spread_activation_boosts(&results, SPREAD_FACTOR);
+        apply_boosts(&mut results, &activation_boosts);
+        for (result, boost) in results.iter_mut().zip(activation_boosts.iter()) {
+            if let Some(explanation) = result.explanation.as_mut() {
+                explanation.activation_boost = *boost;
+            }
+        }
+    } else {
+        spread_activation(&mut results, SPREAD_FACTOR);
+    }
 
     // ── Temporal co-occurrence boost ─────────────────────────
     // Memories created near the same time as high-scoring results get a small
     // boost, implementing Tulving's encoding specificity / contextual
     // reinstatement principle.
-    temporal_cooccurrence_boost(&mut results);
+    if options.explain {
+        let temporal_boosts = temporal_cooccurrence_boosts(&results);
+        apply_boosts(&mut results, &temporal_boosts);
+        for (result, boost) in results.iter_mut().zip(temporal_boosts.iter()) {
+            if let Some(explanation) = result.explanation.as_mut() {
+                explanation.temporal_boost = *boost;
+                explanation.final_score = result.score;
+            }
+        }
+    } else {
+        temporal_cooccurrence_boost(&mut results);
+    }
 
     results.sort_by(|a, b| {
         b.score
@@ -445,14 +516,17 @@ mod tests {
             RecallResult {
                 memory: make_fact_record(1, "Jared", "has_pet", "Tortellini"),
                 score: 1.0,
+                explanation: None,
             },
             RecallResult {
                 memory: make_fact_record(2, "Tortellini", "is_a", "dog"),
                 score: 0.1, // low initial score
+                explanation: None,
             },
             RecallResult {
                 memory: make_fact_record(3, "Abby", "likes", "cats"),
                 score: 0.1, // unrelated
+                explanation: None,
             },
         ];
 
@@ -480,10 +554,12 @@ mod tests {
             RecallResult {
                 memory: make_fact_record(1, "Jared", "works_at", "Microsoft"),
                 score: 0.8,
+                explanation: None,
             },
             RecallResult {
                 memory: make_fact_record(2, "Microsoft", "located_in", "Seattle"),
                 score: 0.3,
+                explanation: None,
             },
         ];
 
@@ -503,6 +579,7 @@ mod tests {
         let mut results = vec![RecallResult {
             memory: make_fact_record(1, "Jared", "builds", "Gen"),
             score: 1.0,
+            explanation: None,
         }];
 
         spread_activation(&mut results, SPREAD_FACTOR);
@@ -520,6 +597,7 @@ mod tests {
             RecallResult {
                 memory: make_timed_episode(1, "alpha anchor memory", now),
                 score: 1.0,
+                explanation: None,
             },
             RecallResult {
                 memory: make_timed_episode(
@@ -528,6 +606,7 @@ mod tests {
                     now - chrono::Duration::minutes(5),
                 ),
                 score: 0.2,
+                explanation: None,
             },
             RecallResult {
                 memory: make_timed_episode(
@@ -536,6 +615,7 @@ mod tests {
                     now - chrono::Duration::hours(3),
                 ),
                 score: 0.2,
+                explanation: None,
             },
         ];
 
@@ -564,6 +644,7 @@ mod tests {
             RecallResult {
                 memory: make_timed_episode(1, "alpha anchor", now),
                 score: 1.0,
+                explanation: None,
             },
             RecallResult {
                 memory: make_timed_episode(
@@ -572,10 +653,12 @@ mod tests {
                     now - chrono::Duration::minutes(2),
                 ),
                 score: 0.1,
+                explanation: None,
             },
             RecallResult {
                 memory: make_timed_episode(3, "alpha further", now - chrono::Duration::minutes(25)),
                 score: 0.1,
+                explanation: None,
             },
         ];
 
@@ -745,6 +828,46 @@ mod tests {
         assert!(results
             .iter()
             .any(|r| matches!(r.memory.kind, MemoryKind::Episode(_))));
+    }
+
+    #[test]
+    fn recall_explain_includes_breakdown_and_final_score_matches() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .remember_episode("alpha explainable memory", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        let results = recall_with_filter_in_options(
+            &store,
+            DEFAULT_NAMESPACE,
+            "alpha",
+            &MockEmbedder,
+            5,
+            RecallKindFilter::All,
+            RecallOptions { explain: true },
+        )
+        .unwrap();
+
+        assert!(!results.is_empty());
+        for r in &results {
+            let ex = r
+                .explanation
+                .as_ref()
+                .expect("explanation should be present when explain=true");
+            assert!((ex.final_score - r.score).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn recall_default_omits_explanation() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .remember_episode("alpha default no explanation", Some(&[1.0, 0.0]))
+            .unwrap();
+
+        let results = recall(&store, "alpha", &MockEmbedder, 5).unwrap();
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|r| r.explanation.is_none()));
     }
 
     // ── Original tests ───────────────────────────────────────

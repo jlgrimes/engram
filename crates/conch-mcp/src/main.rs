@@ -1,4 +1,4 @@
-use conch_core::{ConchDB, MemoryKind, RecallKindFilter, RecallResult};
+use conch_core::{ConchDB, MemoryKind, RecallKindFilter, RecallOptions, RecallResult};
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
@@ -30,6 +30,7 @@ struct RecallParams {
     query: String,
     limit: Option<usize>,
     kind: Option<String>,
+    explain: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -68,6 +69,20 @@ struct MemoryResponse {
     content: String,
     strength: f64,
     score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rrf_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decayed_strength: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recency_boost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_weight: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation_boost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporal_boost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_score: Option<f64>,
     created_at: String,
     last_accessed_at: String,
     access_count: i64,
@@ -82,12 +97,20 @@ impl From<RecallResult> for MemoryResponse {
             ),
             MemoryKind::Episode(e) => ("episode".into(), e.text.clone()),
         };
+        let explanation = r.explanation;
         MemoryResponse {
             id: r.memory.id,
             kind,
             content,
             strength: r.memory.strength,
             score: r.score,
+            rrf_score: explanation.as_ref().map(|e| e.rrf_score),
+            decayed_strength: explanation.as_ref().map(|e| e.decayed_strength),
+            recency_boost: explanation.as_ref().map(|e| e.recency_boost),
+            access_weight: explanation.as_ref().map(|e| e.access_weight),
+            activation_boost: explanation.as_ref().map(|e| e.activation_boost),
+            temporal_boost: explanation.as_ref().map(|e| e.temporal_boost),
+            final_score: explanation.as_ref().map(|e| e.final_score),
             created_at: r.memory.created_at.to_rfc3339(),
             last_accessed_at: r.memory.last_accessed_at.to_rfc3339(),
             access_count: r.memory.access_count,
@@ -160,7 +183,15 @@ impl ConchServer {
         };
         let namespace = p.namespace.as_deref().unwrap_or("default");
         let conch = self.conch.lock().unwrap();
-        match conch.recall_filtered_in(namespace, &p.query, p.limit.unwrap_or(5), kind) {
+        match conch.recall_filtered_in_with_options(
+            namespace,
+            &p.query,
+            p.limit.unwrap_or(5),
+            kind,
+            RecallOptions {
+                explain: p.explain.unwrap_or(false),
+            },
+        ) {
             Ok(results) => {
                 let responses: Vec<MemoryResponse> =
                     results.into_iter().map(MemoryResponse::from).collect();

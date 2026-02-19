@@ -81,7 +81,7 @@ pub(crate) fn effective_strength(mem: &MemoryRecord, now: chrono::DateTime<Utc>)
 /// receive a fractional boost proportional to the parent's score. This
 /// implements Collins & Loftus (1975) spreading activation: querying "Max"
 /// will also boost "Jared has_pet Max" and "Max visited vet".
-pub(crate) fn spread_activation(results: &mut [RecallResult], factor: f64) {
+pub(crate) fn spread_activation_boosts(results: &[RecallResult], factor: f64) -> Vec<f64> {
     // Build index: subject/object → list of result indices.
     let mut entity_index: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, r) in results.iter().enumerate() {
@@ -110,20 +110,32 @@ pub(crate) fn spread_activation(results: &mut [RecallResult], factor: f64) {
         }
     }
 
-    // Apply boosts.
+    let mut out = vec![0.0; results.len()];
     for (idx, boost) in boosts {
-        if idx < results.len() {
-            results[idx].score += boost;
+        if idx < out.len() {
+            out[idx] += boost;
         }
     }
+    out
+}
+
+pub(crate) fn apply_boosts(results: &mut [RecallResult], boosts: &[f64]) {
+    for (result, boost) in results.iter_mut().zip(boosts.iter()) {
+        result.score += *boost;
+    }
+}
+
+pub(crate) fn spread_activation(results: &mut [RecallResult], factor: f64) {
+    let boosts = spread_activation_boosts(results, factor);
+    apply_boosts(results, &boosts);
 }
 
 /// Temporal co-occurrence boost: memories created within 30 minutes of a
 /// high-scoring result get a small boost, implementing contextual
 /// reinstatement (Tulving & Thomson, 1973).
-pub(crate) fn temporal_cooccurrence_boost(results: &mut [RecallResult]) {
+pub(crate) fn temporal_cooccurrence_boosts(results: &[RecallResult]) -> Vec<f64> {
     if results.len() < 2 {
-        return;
+        return vec![0.0; results.len()];
     }
 
     // Use the top 5 results as "anchors" — don't let every result boost every other.
@@ -155,9 +167,16 @@ pub(crate) fn temporal_cooccurrence_boost(results: &mut [RecallResult]) {
         }
     }
 
+    let mut out = vec![0.0; results.len()];
     for (idx, boost) in boosts {
-        if idx < results.len() {
-            results[idx].score += boost;
+        if idx < out.len() {
+            out[idx] += boost;
         }
     }
+    out
+}
+
+pub(crate) fn temporal_cooccurrence_boost(results: &mut [RecallResult]) {
+    let boosts = temporal_cooccurrence_boosts(results);
+    apply_boosts(results, &boosts);
 }

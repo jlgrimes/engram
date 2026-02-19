@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use conch_core::{memory::MemoryKind, ConchDB, RecallKindFilter};
+use conch_core::{memory::MemoryKind, ConchDB, RecallKindFilter, RecallOptions};
 use std::io::{self, Read};
 
 #[derive(Parser)]
@@ -34,6 +34,8 @@ enum Command {
         limit: usize,
         #[arg(long, value_enum, default_value_t = RecallKindArg::All)]
         kind: RecallKindArg,
+        #[arg(long)]
+        explain: bool,
     },
     /// Delete memories
     Forget {
@@ -148,8 +150,19 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
                 println!("Remembered episode: {text}");
             }
         }
-        Command::Recall { query, limit, kind } => {
-            let results = db.recall_filtered_in(&cli.namespace, query, *limit, (*kind).into())?;
+        Command::Recall {
+            query,
+            limit,
+            kind,
+            explain,
+        } => {
+            let results = db.recall_filtered_in_with_options(
+                &cli.namespace,
+                query,
+                *limit,
+                (*kind).into(),
+                RecallOptions { explain: *explain },
+            )?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else if !cli.quiet {
@@ -166,6 +179,21 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
                             "[episode] {} (str: {:.2}, score: {:.3})",
                             e.text, r.memory.strength, r.score
                         ),
+                    }
+
+                    if *explain {
+                        if let Some(ex) = &r.explanation {
+                            println!(
+                                "  ↳ explain: rrf={:.5} decayed={:.3} recency={:.3} access={:.3} activation={:.5} temporal={:.5} final={:.5}",
+                                ex.rrf_score,
+                                ex.decayed_strength,
+                                ex.recency_boost,
+                                ex.access_weight,
+                                ex.activation_boost,
+                                ex.temporal_boost,
+                                ex.final_score
+                            );
+                        }
                     }
                 }
             }
@@ -300,6 +328,7 @@ mod tests {
                 query: "Jared".to_string(),
                 limit: 10,
                 kind: RecallKindArg::Fact,
+                explain: false,
             },
         };
         run(&recall_fact_cli, &db).unwrap();

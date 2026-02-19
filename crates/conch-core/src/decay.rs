@@ -1,4 +1,4 @@
-use crate::store::MemoryStore;
+use crate::store::{MemoryStore, DEFAULT_NAMESPACE};
 
 /// Default decay factor.
 const DEFAULT_DECAY_FACTOR: f64 = 0.5;
@@ -28,15 +28,24 @@ pub fn run_decay(
     decay_factor: Option<f64>,
     half_life_hours: Option<f64>,
 ) -> Result<DecayResult, rusqlite::Error> {
+    run_decay_in(store, DEFAULT_NAMESPACE, decay_factor, half_life_hours)
+}
+
+pub fn run_decay_in(
+    store: &MemoryStore,
+    namespace: &str,
+    decay_factor: Option<f64>,
+    half_life_hours: Option<f64>,
+) -> Result<DecayResult, rusqlite::Error> {
     let factor = decay_factor.unwrap_or(DEFAULT_DECAY_FACTOR);
     let half_life = half_life_hours.unwrap_or(DEFAULT_HALF_LIFE_HOURS);
 
-    let decayed = store.decay_all(factor, half_life)?;
+    let decayed = store.decay_all_in(namespace, factor, half_life)?;
 
     // Delete memories that have decayed below minimum strength
     let deleted: usize = store.conn().execute(
-        "DELETE FROM memories WHERE strength < ?1",
-        rusqlite::params![MIN_STRENGTH],
+        "DELETE FROM memories WHERE namespace = ?1 AND strength < ?2",
+        rusqlite::params![namespace, MIN_STRENGTH],
     )?;
 
     Ok(DecayResult { decayed, deleted })

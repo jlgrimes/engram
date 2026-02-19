@@ -8,7 +8,7 @@ use crate::recall_scoring::{
     access_weight, effective_strength, recency_boost, spread_activation,
     temporal_cooccurrence_boost, touch_boost, SPREAD_FACTOR,
 };
-use crate::store::MemoryStore;
+use crate::store::{MemoryStore, DEFAULT_NAMESPACE};
 
 /// Minimum cosine similarity threshold for vector search results.
 const VECTOR_SIMILARITY_THRESHOLD: f32 = 0.3;
@@ -65,7 +65,14 @@ pub fn recall(
     embedder: &dyn Embedder,
     limit: usize,
 ) -> Result<Vec<RecallResult>, RecallError> {
-    recall_with_filter(store, query, embedder, limit, RecallKindFilter::All)
+    recall_with_filter_in(
+        store,
+        DEFAULT_NAMESPACE,
+        query,
+        embedder,
+        limit,
+        RecallKindFilter::All,
+    )
 }
 
 pub fn recall_with_filter(
@@ -75,7 +82,20 @@ pub fn recall_with_filter(
     limit: usize,
     filter: RecallKindFilter,
 ) -> Result<Vec<RecallResult>, RecallError> {
-    let all_memories = store.all_memories_with_text().map_err(RecallError::Db)?;
+    recall_with_filter_in(store, DEFAULT_NAMESPACE, query, embedder, limit, filter)
+}
+
+pub fn recall_with_filter_in(
+    store: &MemoryStore,
+    namespace: &str,
+    query: &str,
+    embedder: &dyn Embedder,
+    limit: usize,
+    filter: RecallKindFilter,
+) -> Result<Vec<RecallResult>, RecallError> {
+    let all_memories = store
+        .all_memories_with_text_in(namespace)
+        .map_err(RecallError::Db)?;
     let filtered_memories: Vec<(MemoryRecord, String)> = all_memories
         .into_iter()
         .filter(|(m, _)| filter.matches(&m.kind))
@@ -633,6 +653,7 @@ mod tests {
     fn make_fact_record(id: i64, subj: &str, rel: &str, obj: &str) -> MemoryRecord {
         MemoryRecord {
             id,
+            namespace: "default".to_string(),
             kind: MemoryKind::Fact(crate::memory::Fact {
                 subject: subj.to_string(),
                 relation: rel.to_string(),
@@ -649,6 +670,7 @@ mod tests {
     fn make_timed_episode(id: i64, text: &str, time: chrono::DateTime<Utc>) -> MemoryRecord {
         MemoryRecord {
             id,
+            namespace: "default".to_string(),
             kind: MemoryKind::Episode(crate::memory::Episode {
                 text: text.to_string(),
             }),

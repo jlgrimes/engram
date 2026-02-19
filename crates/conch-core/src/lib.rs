@@ -5,11 +5,13 @@ pub mod recall;
 mod recall_scoring;
 pub mod store;
 
-pub use decay::{run_decay, DecayResult};
+pub use decay::{run_decay, run_decay_in, DecayResult};
 pub use embed::{cosine_similarity, EmbedError, Embedder, FastEmbedder, SharedEmbedder};
 pub use memory::{Episode, ExportData, Fact, MemoryKind, MemoryRecord, MemoryStats};
-pub use recall::{recall, recall_with_filter, RecallError, RecallKindFilter, RecallResult};
-pub use store::MemoryStore;
+pub use recall::{
+    recall, recall_with_filter, recall_with_filter_in, RecallError, RecallKindFilter, RecallResult,
+};
+pub use store::{MemoryStore, DEFAULT_NAMESPACE};
 
 use chrono::Duration;
 
@@ -52,8 +54,21 @@ impl ConchDB {
         relation: &str,
         object: &str,
     ) -> Result<MemoryRecord, ConchError> {
-        // Check for existing duplicate
-        if let Some(existing) = self.store.find_fact(subject, relation, object)? {
+        self.remember_fact_in(DEFAULT_NAMESPACE, subject, relation, object)
+    }
+
+    pub fn remember_fact_in(
+        &self,
+        namespace: &str,
+        subject: &str,
+        relation: &str,
+        object: &str,
+    ) -> Result<MemoryRecord, ConchError> {
+        // Check for existing duplicate in namespace only
+        if let Some(existing) = self
+            .store
+            .find_fact_in(namespace, subject, relation, object)?
+        {
             self.store.reinforce_memory(existing.id)?;
             return Ok(self
                 .store
@@ -62,15 +77,23 @@ impl ConchDB {
         }
         let text = format!("{subject} {relation} {object}");
         let embedding = self.embedder.embed_one(&text)?;
-        let id = self
-            .store
-            .remember_fact(subject, relation, object, Some(&embedding))?;
+        let id =
+            self.store
+                .remember_fact_in(namespace, subject, relation, object, Some(&embedding))?;
         Ok(self.store.get_memory(id)?.expect("just inserted"))
     }
 
     pub fn remember_episode(&self, text: &str) -> Result<MemoryRecord, ConchError> {
-        // Check for existing duplicate
-        if let Some(existing) = self.store.find_episode(text)? {
+        self.remember_episode_in(DEFAULT_NAMESPACE, text)
+    }
+
+    pub fn remember_episode_in(
+        &self,
+        namespace: &str,
+        text: &str,
+    ) -> Result<MemoryRecord, ConchError> {
+        // Check for existing duplicate in namespace only
+        if let Some(existing) = self.store.find_episode_in(namespace, text)? {
             self.store.reinforce_memory(existing.id)?;
             return Ok(self
                 .store
@@ -78,12 +101,31 @@ impl ConchDB {
                 .expect("just reinforced"));
         }
         let embedding = self.embedder.embed_one(text)?;
-        let id = self.store.remember_episode(text, Some(&embedding))?;
+        let id = self
+            .store
+            .remember_episode_in(namespace, text, Some(&embedding))?;
         Ok(self.store.get_memory(id)?.expect("just inserted"))
     }
 
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<RecallResult>, ConchError> {
-        recall::recall(&self.store, query, self.embedder.as_ref(), limit).map_err(|e| match e {
+        self.recall_in(DEFAULT_NAMESPACE, query, limit)
+    }
+
+    pub fn recall_in(
+        &self,
+        namespace: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RecallResult>, ConchError> {
+        recall::recall_with_filter_in(
+            &self.store,
+            namespace,
+            query,
+            self.embedder.as_ref(),
+            limit,
+            RecallKindFilter::All,
+        )
+        .map_err(|e| match e {
             RecallError::Db(e) => ConchError::Db(e),
             RecallError::Embedding(msg) => ConchError::Embed(EmbedError::Other(msg)),
         })
@@ -95,16 +137,40 @@ impl ConchDB {
         limit: usize,
         kind: RecallKindFilter,
     ) -> Result<Vec<RecallResult>, ConchError> {
-        recall::recall_with_filter(&self.store, query, self.embedder.as_ref(), limit, kind).map_err(
-            |e| match e {
-                RecallError::Db(e) => ConchError::Db(e),
-                RecallError::Embedding(msg) => ConchError::Embed(EmbedError::Other(msg)),
-            },
+        self.recall_filtered_in(DEFAULT_NAMESPACE, query, limit, kind)
+    }
+
+    pub fn recall_filtered_in(
+        &self,
+        namespace: &str,
+        query: &str,
+        limit: usize,
+        kind: RecallKindFilter,
+    ) -> Result<Vec<RecallResult>, ConchError> {
+        recall::recall_with_filter_in(
+            &self.store,
+            namespace,
+            query,
+            self.embedder.as_ref(),
+            limit,
+            kind,
         )
+        .map_err(|e| match e {
+            RecallError::Db(e) => ConchError::Db(e),
+            RecallError::Embedding(msg) => ConchError::Embed(EmbedError::Other(msg)),
+        })
     }
 
     pub fn forget_by_subject(&self, subject: &str) -> Result<usize, ConchError> {
         Ok(self.store.forget_by_subject(subject)?)
+    }
+
+    pub fn forget_by_subject_in(
+        &self,
+        namespace: &str,
+        subject: &str,
+    ) -> Result<usize, ConchError> {
+        Ok(self.store.forget_by_subject_in(namespace, subject)?)
     }
 
     pub fn forget_by_id(&self, id: &str) -> Result<usize, ConchError> {
@@ -115,16 +181,34 @@ impl ConchDB {
         Ok(self.store.forget_older_than(Duration::seconds(secs))?)
     }
 
+    pub fn forget_older_than_in(&self, namespace: &str, secs: i64) -> Result<usize, ConchError> {
+        Ok(self
+            .store
+            .forget_older_than_in(namespace, Duration::seconds(secs))?)
+    }
+
     pub fn decay(&self) -> Result<DecayResult, ConchError> {
-        Ok(decay::run_decay(&self.store, None, None)?)
+        self.decay_in(DEFAULT_NAMESPACE)
+    }
+
+    pub fn decay_in(&self, namespace: &str) -> Result<DecayResult, ConchError> {
+        Ok(decay::run_decay_in(&self.store, namespace, None, None)?)
     }
 
     pub fn stats(&self) -> Result<MemoryStats, ConchError> {
         Ok(self.store.stats()?)
     }
 
+    pub fn stats_in(&self, namespace: &str) -> Result<MemoryStats, ConchError> {
+        Ok(self.store.stats_in(namespace)?)
+    }
+
     pub fn embed_all(&self) -> Result<usize, ConchError> {
-        let missing = self.store.memories_missing_embeddings()?;
+        self.embed_all_in(DEFAULT_NAMESPACE)
+    }
+
+    pub fn embed_all_in(&self, namespace: &str) -> Result<usize, ConchError> {
+        let missing = self.store.memories_missing_embeddings_in(namespace)?;
         if missing.is_empty() {
             return Ok(0);
         }
@@ -150,6 +234,7 @@ impl ConchDB {
             match &mem.kind {
                 MemoryKind::Fact(f) => {
                     self.store.import_fact(
+                        &mem.namespace,
                         &f.subject,
                         &f.relation,
                         &f.object,
@@ -162,6 +247,7 @@ impl ConchDB {
                 }
                 MemoryKind::Episode(e) => {
                     self.store.import_episode(
+                        &mem.namespace,
                         &e.text,
                         mem.strength,
                         mem.embedding.as_deref(),
@@ -268,5 +354,51 @@ mod tests {
 
         let stats = db.stats().unwrap();
         assert_eq!(stats.total_episodes, 2);
+    }
+
+    #[test]
+    fn same_fact_in_different_namespaces_does_not_dedupe() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        let a = db
+            .remember_fact_in("agent-a", "Rust", "is", "great")
+            .unwrap();
+        let b = db
+            .remember_fact_in("agent-b", "Rust", "is", "great")
+            .unwrap();
+
+        assert_ne!(a.id, b.id);
+        assert_eq!(db.stats_in("agent-a").unwrap().total_facts, 1);
+        assert_eq!(db.stats_in("agent-b").unwrap().total_facts, 1);
+    }
+
+    #[test]
+    fn recall_is_namespace_isolated() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        db.remember_episode_in("team-a", "alpha context").unwrap();
+        db.remember_episode_in("team-b", "bravo context").unwrap();
+
+        let a = db.recall_in("team-a", "alpha", 10).unwrap();
+        assert!(!a.is_empty());
+        assert!(a.iter().all(|r| r.memory.namespace == "team-a"));
+
+        let b = db.recall_in("team-b", "bravo", 10).unwrap();
+        assert!(!b.is_empty());
+        assert!(b.iter().all(|r| r.memory.namespace == "team-b"));
+    }
+
+    #[test]
+    fn default_namespace_wrappers_still_work() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        let mem = db.remember_fact("Jared", "builds", "conch").unwrap();
+        assert_eq!(mem.namespace, DEFAULT_NAMESPACE);
+
+        let recalled = db.recall("Jared", 5).unwrap();
+        assert!(!recalled.is_empty());
+        assert!(recalled
+            .iter()
+            .all(|r| r.memory.namespace == DEFAULT_NAMESPACE));
     }
 }

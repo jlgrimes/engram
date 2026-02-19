@@ -4,6 +4,8 @@ use std::path::Path;
 
 use crate::memory::{Episode, Fact, MemoryKind, MemoryRecord, MemoryStats};
 
+pub const DEFAULT_NAMESPACE: &str = "default";
+
 pub struct MemoryStore {
     conn: Connection,
 }
@@ -30,20 +32,39 @@ impl MemoryStore {
     fn init_schema(&self) -> SqlResult<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memories (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind            TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
-                subject         TEXT,
-                relation        TEXT,
-                object          TEXT,
-                episode_text    TEXT,
-                strength        REAL NOT NULL DEFAULT 1.0,
-                embedding       BLOB,
-                created_at      TEXT NOT NULL,
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                namespace        TEXT NOT NULL DEFAULT 'default',
+                kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                subject          TEXT,
+                relation         TEXT,
+                object           TEXT,
+                episode_text     TEXT,
+                strength         REAL NOT NULL DEFAULT 1.0,
+                embedding        BLOB,
+                created_at       TEXT NOT NULL,
                 last_accessed_at TEXT NOT NULL,
-                access_count    INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
-            CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);",
+                access_count     INTEGER NOT NULL DEFAULT 0
+            );",
+        )?;
+
+        // Migration path for older DBs that predate namespaces.
+        let has_namespace: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'namespace'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_namespace == 0 {
+            self.conn.execute(
+                "ALTER TABLE memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'",
+                [],
+            )?;
+        }
+
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
+             CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
+             CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
+             CREATE INDEX IF NOT EXISTS idx_memories_kind_namespace ON memories(kind, namespace);",
         )?;
         Ok(())
     }
@@ -57,23 +78,43 @@ impl MemoryStore {
         object: &str,
         embedding: Option<&[f32]>,
     ) -> SqlResult<i64> {
+        self.remember_fact_in(DEFAULT_NAMESPACE, subject, relation, object, embedding)
+    }
+
+    pub fn remember_fact_in(
+        &self,
+        namespace: &str,
+        subject: &str,
+        relation: &str,
+        object: &str,
+        embedding: Option<&[f32]>,
+    ) -> SqlResult<i64> {
         let now = Utc::now().to_rfc3339();
         let emb_blob = embedding.map(embedding_to_blob);
         self.conn.execute(
-            "INSERT INTO memories (kind, subject, relation, object, embedding, created_at, last_accessed_at)
-             VALUES ('fact', ?1, ?2, ?3, ?4, ?5, ?5)",
-            params![subject, relation, object, emb_blob, now],
+            "INSERT INTO memories (namespace, kind, subject, relation, object, embedding, created_at, last_accessed_at)
+             VALUES (?1, 'fact', ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![namespace, subject, relation, object, emb_blob, now],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     pub fn remember_episode(&self, text: &str, embedding: Option<&[f32]>) -> SqlResult<i64> {
+        self.remember_episode_in(DEFAULT_NAMESPACE, text, embedding)
+    }
+
+    pub fn remember_episode_in(
+        &self,
+        namespace: &str,
+        text: &str,
+        embedding: Option<&[f32]>,
+    ) -> SqlResult<i64> {
         let now = Utc::now().to_rfc3339();
         let emb_blob = embedding.map(embedding_to_blob);
         self.conn.execute(
-            "INSERT INTO memories (kind, episode_text, embedding, created_at, last_accessed_at)
-             VALUES ('episode', ?1, ?2, ?3, ?3)",
-            params![text, emb_blob, now],
+            "INSERT INTO memories (namespace, kind, episode_text, embedding, created_at, last_accessed_at)
+             VALUES (?1, 'episode', ?2, ?3, ?4, ?4)",
+            params![namespace, text, emb_blob, now],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -86,12 +127,24 @@ impl MemoryStore {
         relation: &str,
         object: &str,
     ) -> SqlResult<Option<MemoryRecord>> {
+        self.find_fact_in(DEFAULT_NAMESPACE, subject, relation, object)
+    }
+
+    pub fn find_fact_in(
+        &self,
+        namespace: &str,
+        subject: &str,
+        relation: &str,
+        object: &str,
+    ) -> SqlResult<Option<MemoryRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, subject, relation, object, episode_text,
+            "SELECT id, namespace, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count
-             FROM memories WHERE kind = 'fact' AND subject = ?1 AND relation = ?2 AND object = ?3",
+             FROM memories
+             WHERE namespace = ?1 AND kind = 'fact' AND subject = ?2 AND relation = ?3 AND object = ?4",
         )?;
-        let mut rows = stmt.query_map(params![subject, relation, object], row_to_memory)?;
+        let mut rows =
+            stmt.query_map(params![namespace, subject, relation, object], row_to_memory)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
@@ -99,12 +152,21 @@ impl MemoryStore {
     }
 
     pub fn find_episode(&self, episode_text: &str) -> SqlResult<Option<MemoryRecord>> {
+        self.find_episode_in(DEFAULT_NAMESPACE, episode_text)
+    }
+
+    pub fn find_episode_in(
+        &self,
+        namespace: &str,
+        episode_text: &str,
+    ) -> SqlResult<Option<MemoryRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, subject, relation, object, episode_text,
+            "SELECT id, namespace, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count
-             FROM memories WHERE kind = 'episode' AND episode_text = ?1",
+             FROM memories
+             WHERE namespace = ?1 AND kind = 'episode' AND episode_text = ?2",
         )?;
-        let mut rows = stmt.query_map(params![episode_text], row_to_memory)?;
+        let mut rows = stmt.query_map(params![namespace, episode_text], row_to_memory)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
@@ -126,12 +188,19 @@ impl MemoryStore {
     // ── Recall ───────────────────────────────────────────────
 
     pub fn all_memories_with_text(&self) -> SqlResult<Vec<(MemoryRecord, String)>> {
+        self.all_memories_with_text_in(DEFAULT_NAMESPACE)
+    }
+
+    pub fn all_memories_with_text_in(
+        &self,
+        namespace: &str,
+    ) -> SqlResult<Vec<(MemoryRecord, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, subject, relation, object, episode_text,
+            "SELECT id, namespace, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count
-             FROM memories WHERE strength > 0.01",
+             FROM memories WHERE namespace = ?1 AND strength > 0.01",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![namespace], |row| {
             let mem = row_to_memory(row)?;
             let text = mem.text_for_embedding();
             Ok((mem, text))
@@ -154,7 +223,7 @@ impl MemoryStore {
 
     pub fn get_memory(&self, id: i64) -> SqlResult<Option<MemoryRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, subject, relation, object, episode_text,
+            "SELECT id, namespace, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count
              FROM memories WHERE id = ?1",
         )?;
@@ -168,12 +237,23 @@ impl MemoryStore {
     // ── Decay ────────────────────────────────────────────────
 
     pub fn decay_all(&self, decay_factor: f64, half_life_hours: f64) -> SqlResult<usize> {
+        self.decay_all_in(DEFAULT_NAMESPACE, decay_factor, half_life_hours)
+    }
+
+    pub fn decay_all_in(
+        &self,
+        namespace: &str,
+        decay_factor: f64,
+        half_life_hours: f64,
+    ) -> SqlResult<usize> {
         let now = Utc::now();
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, last_accessed_at, strength FROM memories WHERE strength > 0.01")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, last_accessed_at, strength FROM memories WHERE namespace = ?1 AND strength > 0.01",
+        )?;
         let rows: Vec<(i64, String, f64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .query_map(params![namespace], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
             .collect::<SqlResult<Vec<_>>>()?;
 
         let mut count = 0;
@@ -197,34 +277,46 @@ impl MemoryStore {
     // ── Forget ───────────────────────────────────────────────
 
     pub fn forget_by_subject(&self, subject: &str) -> SqlResult<usize> {
-        self.conn
-            .execute("DELETE FROM memories WHERE subject = ?1", params![subject])
+        self.forget_by_subject_in(DEFAULT_NAMESPACE, subject)
+    }
+
+    pub fn forget_by_subject_in(&self, namespace: &str, subject: &str) -> SqlResult<usize> {
+        self.conn.execute(
+            "DELETE FROM memories WHERE namespace = ?1 AND subject = ?2",
+            params![namespace, subject],
+        )
     }
 
     pub fn forget_by_id(&self, id: &str) -> SqlResult<usize> {
-        let changed = self
-            .conn
-            .execute("DELETE FROM memories WHERE id = ?1", params![id])?;
-        Ok(changed)
+        self.conn
+            .execute("DELETE FROM memories WHERE id = ?1", params![id])
     }
 
     pub fn forget_older_than(&self, duration: Duration) -> SqlResult<usize> {
+        self.forget_older_than_in(DEFAULT_NAMESPACE, duration)
+    }
+
+    pub fn forget_older_than_in(&self, namespace: &str, duration: Duration) -> SqlResult<usize> {
         let cutoff = (Utc::now() - duration).to_rfc3339();
         self.conn.execute(
-            "DELETE FROM memories WHERE created_at < ?1",
-            params![cutoff],
+            "DELETE FROM memories WHERE namespace = ?1 AND created_at < ?2",
+            params![namespace, cutoff],
         )
     }
 
     // ── Embed ────────────────────────────────────────────────
 
     pub fn memories_missing_embeddings(&self) -> SqlResult<Vec<MemoryRecord>> {
+        self.memories_missing_embeddings_in(DEFAULT_NAMESPACE)
+    }
+
+    pub fn memories_missing_embeddings_in(&self, namespace: &str) -> SqlResult<Vec<MemoryRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, subject, relation, object, episode_text,
+            "SELECT id, namespace, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count
-             FROM memories WHERE embedding IS NULL",
+             FROM memories WHERE namespace = ?1 AND embedding IS NULL",
         )?;
-        let rows = stmt.query_map([], row_to_memory)?;
+        let rows = stmt.query_map(params![namespace], row_to_memory)?;
         rows.collect()
     }
 
@@ -240,7 +332,7 @@ impl MemoryStore {
 
     pub fn all_memories(&self) -> SqlResult<Vec<MemoryRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, subject, relation, object, episode_text,
+            "SELECT id, namespace, kind, subject, relation, object, episode_text,
                     strength, embedding, created_at, last_accessed_at, access_count
              FROM memories",
         )?;
@@ -251,6 +343,7 @@ impl MemoryStore {
     #[allow(clippy::too_many_arguments)]
     pub fn import_fact(
         &self,
+        namespace: &str,
         subject: &str,
         relation: &str,
         object: &str,
@@ -262,15 +355,17 @@ impl MemoryStore {
     ) -> SqlResult<i64> {
         let emb_blob = embedding.map(embedding_to_blob);
         self.conn.execute(
-            "INSERT INTO memories (kind, subject, relation, object, strength, embedding, created_at, last_accessed_at, access_count)
-             VALUES ('fact', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![subject, relation, object, strength, emb_blob, created_at, last_accessed_at, access_count],
+            "INSERT INTO memories (namespace, kind, subject, relation, object, strength, embedding, created_at, last_accessed_at, access_count)
+             VALUES (?1, 'fact', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![namespace, subject, relation, object, strength, emb_blob, created_at, last_accessed_at, access_count],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn import_episode(
         &self,
+        namespace: &str,
         text: &str,
         strength: f64,
         embedding: Option<&[f32]>,
@@ -280,9 +375,9 @@ impl MemoryStore {
     ) -> SqlResult<i64> {
         let emb_blob = embedding.map(embedding_to_blob);
         self.conn.execute(
-            "INSERT INTO memories (kind, episode_text, strength, embedding, created_at, last_accessed_at, access_count)
-             VALUES ('episode', ?1, ?2, ?3, ?4, ?5, ?6)",
-            params![text, strength, emb_blob, created_at, last_accessed_at, access_count],
+            "INSERT INTO memories (namespace, kind, episode_text, strength, embedding, created_at, last_accessed_at, access_count)
+             VALUES (?1, 'episode', ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![namespace, text, strength, emb_blob, created_at, last_accessed_at, access_count],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -290,22 +385,28 @@ impl MemoryStore {
     // ── Stats ────────────────────────────────────────────────
 
     pub fn stats(&self) -> SqlResult<MemoryStats> {
-        let total_memories: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
+        self.stats_in(DEFAULT_NAMESPACE)
+    }
+
+    pub fn stats_in(&self, namespace: &str) -> SqlResult<MemoryStats> {
+        let total_memories: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = ?1",
+            params![namespace],
+            |r| r.get(0),
+        )?;
         let total_facts: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE kind = 'fact'",
-            [],
+            "SELECT COUNT(*) FROM memories WHERE namespace = ?1 AND kind = 'fact'",
+            params![namespace],
             |r| r.get(0),
         )?;
         let total_episodes: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE kind = 'episode'",
-            [],
+            "SELECT COUNT(*) FROM memories WHERE namespace = ?1 AND kind = 'episode'",
+            params![namespace],
             |r| r.get(0),
         )?;
         let avg_strength: f64 = self.conn.query_row(
-            "SELECT COALESCE(AVG(strength), 0.0) FROM memories",
-            [],
+            "SELECT COALESCE(AVG(strength), 0.0) FROM memories WHERE namespace = ?1",
+            params![namespace],
             |r| r.get(0),
         )?;
         Ok(MemoryStats {
@@ -336,25 +437,26 @@ fn parse_datetime(s: &str) -> DateTime<Utc> {
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> SqlResult<MemoryRecord> {
-    let kind_str: String = row.get(1)?;
+    let kind_str: String = row.get(2)?;
     let kind = match kind_str.as_str() {
         "fact" => MemoryKind::Fact(Fact {
-            subject: row.get(2)?,
-            relation: row.get(3)?,
-            object: row.get(4)?,
+            subject: row.get(3)?,
+            relation: row.get(4)?,
+            object: row.get(5)?,
         }),
         _ => MemoryKind::Episode(Episode {
-            text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            text: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
         }),
     };
-    let embedding: Option<Vec<u8>> = row.get(7)?;
+    let embedding: Option<Vec<u8>> = row.get(8)?;
     Ok(MemoryRecord {
         id: row.get(0)?,
+        namespace: row.get(1)?,
         kind,
-        strength: row.get(6)?,
+        strength: row.get(7)?,
         embedding: embedding.map(|b| blob_to_embedding(&b)),
-        created_at: parse_datetime(&row.get::<_, String>(8)?),
-        last_accessed_at: parse_datetime(&row.get::<_, String>(9)?),
-        access_count: row.get(10)?,
+        created_at: parse_datetime(&row.get::<_, String>(9)?),
+        last_accessed_at: parse_datetime(&row.get::<_, String>(10)?),
+        access_count: row.get(11)?,
     })
 }

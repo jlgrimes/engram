@@ -22,6 +22,7 @@ pub enum MemoryKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub id: i64,
+    pub namespace: String,
     pub kind: MemoryKind,
     pub strength: f64,
     pub embedding: Option<Vec<f32>>,

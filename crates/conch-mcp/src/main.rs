@@ -557,7 +557,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_remember_episode_and_recall_succeeds_without_internal_errors() {
+    async fn concurrent_mixed_remember_and_recall_regression() {
+        // Regression guard: MCP handlers should offload blocking DB work so mixed
+        // concurrent remember/recall calls do not surface internal runtime/lock errors.
         let db = ConchDB::open_in_memory_with(Box::new(NoopEmbedder)).expect("db");
         let server = ConchServer::new(db, "default-ns".to_string());
         let namespace = "team-concurrency".to_string();
@@ -565,72 +567,79 @@ mod tests {
         let seed = server
             .remember_episode(Parameters(RememberEpisodeParams {
                 namespace: Some(namespace.clone()),
-                text: "seed episode".to_string(),
+                text: "seed event".to_string(),
             }))
             .await
             .expect("seed write should succeed");
         let seed_outer = serde_json::to_value(&seed).expect("serialize seed result");
         assert_ne!(seed_outer["isError"], serde_json::Value::Bool(true));
 
-        // Guards against runtime blocking / HOL regressions from inline sync DB work in MCP tools.
-        let remember_server = server.clone();
-        let remember_ns = namespace.clone();
-        let remember_a = tokio::spawn(async move {
-            remember_server
-                .remember_episode(Parameters(RememberEpisodeParams {
-                    namespace: Some(remember_ns),
-                    text: "parallel episode a".to_string(),
-                }))
-                .await
-        });
+        let scenarios = [
+            ("parallel event alpha", "event"),
+            ("parallel event beta", "parallel"),
+            ("parallel event gamma", "seed"),
+        ];
 
-        let recall_server = server.clone();
-        let recall_ns = namespace.clone();
-        let recall_a = tokio::spawn(async move {
-            recall_server
-                .recall(Parameters(RecallParams {
-                    namespace: Some(recall_ns),
-                    query: "episode".to_string(),
-                    limit: Some(5),
-                    kind: Some("episode".to_string()),
-                    explain: Some(false),
-                    diagnostics: Some(false),
-                }))
-                .await
-        });
+        let mut spawned = Vec::new();
+        for (text, query) in scenarios {
+            let remember_server = server.clone();
+            let remember_ns = namespace.clone();
+            let remember_text = text.to_string();
+            spawned.push(tokio::spawn(async move {
+                remember_server
+                    .remember_episode(Parameters(RememberEpisodeParams {
+                        namespace: Some(remember_ns),
+                        text: remember_text,
+                    }))
+                    .await
+            }));
 
-        let remember_b = server.remember_episode(Parameters(RememberEpisodeParams {
+            let recall_server = server.clone();
+            let recall_ns = namespace.clone();
+            let recall_query = query.to_string();
+            spawned.push(tokio::spawn(async move {
+                recall_server
+                    .recall(Parameters(RecallParams {
+                        namespace: Some(recall_ns),
+                        query: recall_query,
+                        limit: Some(5),
+                        kind: Some("episode".to_string()),
+                        explain: Some(false),
+                        diagnostics: Some(false),
+                    }))
+                    .await
+            }));
+        }
+
+        let join_remember = server.remember_episode(Parameters(RememberEpisodeParams {
             namespace: Some(namespace.clone()),
-            text: "parallel episode b".to_string(),
+            text: "join inline event".to_string(),
         }));
-        let recall_b = server.recall(Parameters(RecallParams {
+        let join_recall = server.recall(Parameters(RecallParams {
             namespace: Some(namespace),
-            query: "parallel".to_string(),
+            query: "event".to_string(),
             limit: Some(5),
             kind: Some("episode".to_string()),
             explain: Some(false),
             diagnostics: Some(false),
         }));
+        let (join_remember_result, join_recall_result) = tokio::join!(join_remember, join_recall);
 
-        let (remember_b_res, recall_b_res, remember_a_join, recall_a_join) =
-            tokio::join!(remember_b, recall_b, remember_a, recall_a);
+        let mut results = vec![
+            join_remember_result.expect("join remember should complete"),
+            join_recall_result.expect("join recall should complete"),
+        ];
 
-        let remember_b_res = remember_b_res.expect("inline remember should complete");
-        let recall_b_res = recall_b_res.expect("inline recall should complete");
-        let remember_a_res = remember_a_join
-            .expect("spawned remember task should join")
-            .expect("spawned remember should complete");
-        let recall_a_res = recall_a_join
-            .expect("spawned recall task should join")
-            .expect("spawned recall should complete");
+        for task in spawned {
+            let task_result = task
+                .await
+                .expect("spawned task should join")
+                .expect("spawned tool call should complete");
+            results.push(task_result);
+        }
 
-        for result in [
-            &remember_b_res,
-            &recall_b_res,
-            &remember_a_res,
-            &recall_a_res,
-        ] {
-            let outer = serde_json::to_value(result).expect("serialize tool result");
+        for result in results {
+            let outer = serde_json::to_value(&result).expect("serialize tool result");
             assert_ne!(
                 outer["isError"],
                 serde_json::Value::Bool(true),
@@ -640,7 +649,7 @@ mod tests {
                 .as_str()
                 .expect("tool payload should include text");
             assert!(
-                !text.contains("internal error"),
+                !text.to_ascii_lowercase().contains("internal error"),
                 "tool payload should not contain internal lock/runtime errors"
             );
         }

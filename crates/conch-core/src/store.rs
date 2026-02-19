@@ -353,6 +353,20 @@ impl MemoryStore {
         Ok(())
     }
 
+    // ── Graph traversal ────────────────────────────────────────
+
+    /// Find all facts where the given entity appears as subject OR object.
+    pub fn facts_involving(&self, entity: &str) -> SqlResult<Vec<MemoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, subject, relation, object, episode_text,
+                    strength, embedding, created_at, last_accessed_at, access_count,
+                    tags, source, session_id, channel
+             FROM memories WHERE kind = 'fact' AND (subject = ?1 OR object = ?1)",
+        )?;
+        let rows = stmt.query_map(params![entity], row_to_memory)?;
+        rows.collect()
+    }
+
     // ── Stats ────────────────────────────────────────────────
 
     pub fn stats(&self) -> SqlResult<MemoryStats> {
@@ -492,6 +506,47 @@ mod tests {
         store.remember_fact_with_tags("A", "is", "B", None, &["technical".to_string()]).unwrap();
 
         let results = store.all_memories_with_text_filtered_by_tag("nonexistent").unwrap();
+        assert!(results.is_empty());
+    }
+
+    // ── Graph traversal tests ─────────────────────────────────
+
+    #[test]
+    fn facts_involving_finds_subject_and_object() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact("Alice", "knows", "Bob", None).unwrap();
+        store.remember_fact("Bob", "works_at", "Acme", None).unwrap();
+        store.remember_fact("Charlie", "knows", "Alice", None).unwrap();
+
+        // Alice appears as subject in fact 1, and object in fact 3
+        let results = store.facts_involving("Alice").unwrap();
+        assert_eq!(results.len(), 2, "Alice should appear in 2 facts");
+
+        // Bob appears as object in fact 1, and subject in fact 2
+        let results = store.facts_involving("Bob").unwrap();
+        assert_eq!(results.len(), 2, "Bob should appear in 2 facts");
+
+        // Acme only appears as object in fact 2
+        let results = store.facts_involving("Acme").unwrap();
+        assert_eq!(results.len(), 1, "Acme should appear in 1 fact");
+    }
+
+    #[test]
+    fn facts_involving_ignores_episodes() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact("Alice", "knows", "Bob", None).unwrap();
+        store.remember_episode("Alice had a meeting", None).unwrap();
+
+        let results = store.facts_involving("Alice").unwrap();
+        assert_eq!(results.len(), 1, "should only return facts, not episodes");
+    }
+
+    #[test]
+    fn facts_involving_returns_empty_for_unknown() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact("Alice", "knows", "Bob", None).unwrap();
+
+        let results = store.facts_involving("Unknown").unwrap();
         assert!(results.is_empty());
     }
 

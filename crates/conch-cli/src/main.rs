@@ -75,6 +75,18 @@ enum Command {
     Stats,
     /// Generate embeddings for all memories missing them
     Embed,
+    /// Graph traversal: find related facts connected to a subject
+    Related {
+        subject: String,
+        /// Max traversal depth (1-3, default 2)
+        #[arg(long, default_value_t = 2)]
+        depth: usize,
+    },
+    /// Provenance: show full audit context for a memory
+    Why {
+        /// Memory ID to inspect
+        id: i64,
+    },
     /// Export all memories as JSON to stdout
     Export,
     /// Import memories from JSON on stdin
@@ -204,6 +216,68 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
             else if !cli.quiet {
                 if count == 0 { println!("All memories have embeddings."); }
                 else { println!("Embedded {count} memories."); }
+            }
+        }
+        Command::Related { subject, depth } => {
+            let nodes = db.related(subject, *depth)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&nodes)?);
+            } else if !cli.quiet {
+                if nodes.is_empty() {
+                    println!("No related memories found for \"{subject}\".");
+                } else {
+                    println!("Related memories for \"{subject}\" (depth {depth}):");
+                    for node in &nodes {
+                        let indent = "  ".repeat(node.depth + 1);
+                        match &node.memory.kind {
+                            MemoryKind::Fact(f) => {
+                                println!("{indent}[hop {}] {} {} {} (via: {}, str: {:.2})",
+                                    node.depth, f.subject, f.relation, f.object,
+                                    node.connected_via, node.memory.strength);
+                            }
+                            MemoryKind::Episode(e) => {
+                                println!("{indent}[hop {}] {} (via: {}, str: {:.2})",
+                                    node.depth, e.text, node.connected_via, node.memory.strength);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Command::Why { id } => {
+            match db.why(*id)? {
+                Some(info) => {
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&info)?);
+                    } else if !cli.quiet {
+                        let mem = &info.memory;
+                        let kind_str = match &mem.kind {
+                            MemoryKind::Fact(f) => format!("fact: {} {} {}", f.subject, f.relation, f.object),
+                            MemoryKind::Episode(e) => format!("episode: {}", e.text),
+                        };
+                        println!("Memory #{} — {kind_str}", mem.id);
+                        println!("  Created:       {}", info.created_at);
+                        println!("  Last accessed:  {}", info.last_accessed_at);
+                        println!("  Access count:   {}", info.access_count);
+                        println!("  Strength:       {:.4}", info.strength);
+                        if let Some(src) = &info.source { println!("  Source:         {src}"); }
+                        if let Some(sid) = &info.session_id { println!("  Session:        {sid}"); }
+                        if let Some(ch) = &info.channel { println!("  Channel:        {ch}"); }
+                        if !mem.tags.is_empty() { println!("  Tags:           {}", mem.tags.join(", ")); }
+                        if !info.related.is_empty() {
+                            println!("  Related facts:");
+                            for node in &info.related {
+                                if let MemoryKind::Fact(f) = &node.memory.kind {
+                                    println!("    - {} {} {} (via: {})", f.subject, f.relation, f.object, node.connected_via);
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {
+                    if cli.json { println!("{}", serde_json::json!({ "error": "not found" })); }
+                    else if !cli.quiet { println!("Memory #{id} not found."); }
+                }
             }
         }
         Command::Export => {

@@ -88,6 +88,34 @@ impl RememberResult {
     }
 }
 
+/// A node in a graph traversal result, representing a memory at a certain hop distance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphNode {
+    pub memory: MemoryRecord,
+    /// How many hops from the query subject (0 = direct match).
+    pub depth: usize,
+    /// The entity (subject or object) that connects this node to the previous hop.
+    pub connected_via: String,
+}
+
+/// Provenance information for a single memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceInfo {
+    pub memory: MemoryRecord,
+    pub created_at: String,
+    pub last_accessed_at: String,
+    pub access_count: i64,
+    pub strength: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// 1-hop related facts for context.
+    pub related: Vec<GraphNode>,
+}
+
 impl MemoryRecord {
     pub fn text_for_embedding(&self) -> String {
         match &self.kind {
@@ -99,6 +127,14 @@ impl MemoryRecord {
     pub fn subject(&self) -> Option<&str> {
         match &self.kind {
             MemoryKind::Fact(f) => Some(&f.subject),
+            MemoryKind::Episode(_) => None,
+        }
+    }
+
+    /// Returns the object of this memory if it's a Fact.
+    pub fn object(&self) -> Option<&str> {
+        match &self.kind {
+            MemoryKind::Fact(f) => Some(&f.object),
             MemoryKind::Episode(_) => None,
         }
     }

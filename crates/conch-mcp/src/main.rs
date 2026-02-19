@@ -52,6 +52,20 @@ struct ForgetParams {
     older_than_secs: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RelatedParams {
+    /// The subject entity to traverse from
+    subject: String,
+    /// Max traversal depth (1-3, default 2)
+    depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WhyParams {
+    /// Memory ID to inspect provenance for
+    id: i64,
+}
+
 #[derive(Debug, Serialize)]
 struct MemoryResponse {
     id: i64,
@@ -186,6 +200,34 @@ impl ConchServer {
         let conch = self.conch.lock().unwrap();
         match conch.decay() {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&result).unwrap())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(name = "related", description = "Graph traversal: find facts connected to a subject entity via 1-hop and multi-hop relationships. Returns a graph of related memories with hop distance.")]
+    async fn related(&self, params: Parameters<RelatedParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let depth = p.depth.unwrap_or(2);
+        let conch = self.conch.lock().unwrap();
+        match conch.related(&p.subject, depth) {
+            Ok(nodes) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&nodes).unwrap(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(name = "why", description = "Provenance: show full audit context for a memory — when created, by whom, access count, strength, source, session, channel, and 1-hop related facts.")]
+    async fn why(&self, params: Parameters<WhyParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let conch = self.conch.lock().unwrap();
+        match conch.why(p.id) {
+            Ok(Some(info)) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&info).unwrap(),
+            )])),
+            Ok(None) => Ok(CallToolResult::error(vec![Content::text(
+                serde_json::json!({ "error": "memory not found", "id": p.id }).to_string(),
+            )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }

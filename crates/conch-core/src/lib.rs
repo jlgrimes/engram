@@ -4,7 +4,7 @@ pub mod embed;
 pub mod decay;
 pub mod recall;
 
-pub use memory::{Episode, ExportData, Fact, MemoryKind, MemoryRecord, MemoryStats, RememberResult};
+pub use memory::{Episode, ExportData, Fact, GraphNode, MemoryKind, MemoryRecord, MemoryStats, ProvenanceInfo, RememberResult};
 pub use store::MemoryStore;
 pub use embed::{Embedder, EmbedError, FastEmbedder, SharedEmbedder, cosine_similarity};
 pub use decay::{run_decay, DecayResult};
@@ -243,6 +243,97 @@ impl ConchDB {
             self.store.update_embedding(mem.id, emb)?;
         }
         Ok(missing.len())
+    }
+
+    // ── Graph traversal ──────────────────────────────────────
+
+    /// Find all facts related to a subject via graph traversal up to `max_depth` hops.
+    /// Returns a list of GraphNodes with hop distance.
+    pub fn related(&self, subject: &str, max_depth: usize) -> Result<Vec<GraphNode>, ConchError> {
+        let max_depth = max_depth.min(3);
+        let mut result: Vec<GraphNode> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        // Entities to explore at each depth level
+        let mut frontier = vec![subject.to_string()];
+
+        for depth in 0..max_depth {
+            let mut next_frontier = Vec::new();
+            for entity in &frontier {
+                let facts = self.store.facts_involving(entity)?;
+                for fact in facts {
+                    if seen_ids.contains(&fact.id) {
+                        continue;
+                    }
+                    seen_ids.insert(fact.id);
+                    // Determine the connecting entity and the "other" entity for next hop
+                    let (connected_via, other_entity) = match &fact.kind {
+                        MemoryKind::Fact(f) => {
+                            if f.subject == *entity {
+                                (entity.clone(), f.object.clone())
+                            } else {
+                                (entity.clone(), f.subject.clone())
+                            }
+                        }
+                        _ => continue,
+                    };
+                    next_frontier.push(other_entity);
+                    result.push(GraphNode {
+                        memory: fact,
+                        depth,
+                        connected_via,
+                    });
+                }
+            }
+            frontier = next_frontier;
+        }
+
+        Ok(result)
+    }
+
+    // ── Provenance ──────────────────────────────────────────
+
+    /// Get provenance information for a memory by ID, including metadata and 1-hop related facts.
+    pub fn why(&self, id: i64) -> Result<Option<ProvenanceInfo>, ConchError> {
+        let mem = match self.store.get_memory(id)? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        // Get 1-hop related facts if it's a fact
+        let related = if let MemoryKind::Fact(ref f) = mem.kind {
+            let mut nodes = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            seen.insert(mem.id);
+            for entity in [&f.subject, &f.object] {
+                let facts = self.store.facts_involving(entity)?;
+                for fact in facts {
+                    if seen.contains(&fact.id) {
+                        continue;
+                    }
+                    seen.insert(fact.id);
+                    nodes.push(GraphNode {
+                        memory: fact,
+                        depth: 0,
+                        connected_via: entity.clone(),
+                    });
+                }
+            }
+            nodes
+        } else {
+            vec![]
+        };
+
+        Ok(Some(ProvenanceInfo {
+            created_at: mem.created_at.to_rfc3339(),
+            last_accessed_at: mem.last_accessed_at.to_rfc3339(),
+            access_count: mem.access_count,
+            strength: mem.strength,
+            source: mem.source.clone(),
+            session_id: mem.session_id.clone(),
+            channel: mem.channel.clone(),
+            related,
+            memory: mem,
+        }))
     }
 
     pub fn export(&self) -> Result<ExportData, ConchError> {
@@ -529,5 +620,149 @@ mod tests {
         assert!(!r2.is_duplicate(), "orthogonal embeddings should not trigger dedup");
 
         assert_eq!(db.stats().unwrap().total_memories, 2);
+    }
+
+    // ── Graph traversal tests ───────────────────────────────
+
+    /// Helper: create a ConchDB with OrthogonalEmbedder and insert a chain of facts.
+    fn setup_graph_db() -> ConchDB {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        // Chain: Alice -> knows -> Bob -> works_at -> Acme -> located_in -> NYC
+        db.remember_fact("Alice", "knows", "Bob").unwrap();
+        db.remember_fact("Bob", "works_at", "Acme").unwrap();
+        db.remember_fact("Acme", "located_in", "NYC").unwrap();
+        // Extra connection: Alice -> lives_in -> NYC (creates a cycle)
+        db.remember_fact("Alice", "lives_in", "NYC").unwrap();
+        db
+    }
+
+    #[test]
+    fn related_finds_direct_connections() {
+        let db = setup_graph_db();
+        let nodes = db.related("Alice", 1).unwrap();
+        // Depth 1: Alice -> knows -> Bob, Alice -> lives_in -> NYC
+        assert_eq!(nodes.len(), 2, "Alice should have 2 direct connections, got {}", nodes.len());
+        for node in &nodes {
+            assert_eq!(node.depth, 0, "all nodes at depth 1 traversal should be hop 0");
+        }
+    }
+
+    #[test]
+    fn related_finds_2hop_chain() {
+        let db = setup_graph_db();
+        let nodes = db.related("Alice", 2).unwrap();
+        // Hop 0: Alice->knows->Bob, Alice->lives_in->NYC
+        // Hop 1: Bob->works_at->Acme, Acme->located_in->NYC (NYC is already seen? No, NYC is object)
+        //   From Bob: Bob->works_at->Acme
+        //   From NYC: Acme->located_in->NYC (Acme already seen? Let's check)
+        // Actually NYC connects to: Acme->located_in->NYC, Alice->lives_in->NYC (Alice already processed as subject)
+        // Let's just check we get more nodes at depth 2 than depth 1
+        let nodes_1 = db.related("Alice", 1).unwrap();
+        assert!(nodes.len() > nodes_1.len(), "depth 2 should find more nodes than depth 1");
+
+        // Verify we have both depth 0 and depth 1 nodes
+        let hop0: Vec<_> = nodes.iter().filter(|n| n.depth == 0).collect();
+        let hop1: Vec<_> = nodes.iter().filter(|n| n.depth == 1).collect();
+        assert!(!hop0.is_empty(), "should have hop 0 nodes");
+        assert!(!hop1.is_empty(), "should have hop 1 nodes");
+    }
+
+    #[test]
+    fn related_respects_max_depth_cap() {
+        let db = setup_graph_db();
+        // Max depth is capped at 3
+        let nodes_4 = db.related("Alice", 4).unwrap();
+        let nodes_3 = db.related("Alice", 3).unwrap();
+        assert_eq!(nodes_4.len(), nodes_3.len(), "depth 4 should be capped to 3");
+    }
+
+    #[test]
+    fn related_no_duplicates() {
+        let db = setup_graph_db();
+        let nodes = db.related("Alice", 3).unwrap();
+        let ids: Vec<i64> = nodes.iter().map(|n| n.memory.id).collect();
+        let unique: std::collections::HashSet<i64> = ids.iter().cloned().collect();
+        assert_eq!(ids.len(), unique.len(), "should have no duplicate memory IDs");
+    }
+
+    #[test]
+    fn related_empty_for_unknown_subject() {
+        let db = setup_graph_db();
+        let nodes = db.related("UnknownEntity", 2).unwrap();
+        assert!(nodes.is_empty(), "unknown entity should yield no results");
+    }
+
+    #[test]
+    fn related_finds_reverse_connections() {
+        let db = setup_graph_db();
+        // Bob appears as object of "Alice knows Bob"
+        // and subject of "Bob works_at Acme"
+        let nodes = db.related("Bob", 1).unwrap();
+        assert!(nodes.len() >= 2, "Bob should be found as both subject and object, got {}", nodes.len());
+    }
+
+    // ── Provenance tests ────────────────────────────────────
+
+    #[test]
+    fn why_returns_full_provenance() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        let mem = db.remember_fact_full("Jared", "uses", "Rust", &["technical".to_string()],
+            Some("cli"), Some("sess-42"), Some("#dev")).unwrap();
+
+        let info = db.why(mem.id).unwrap().expect("should find memory");
+        assert_eq!(info.memory.id, mem.id);
+        assert_eq!(info.source.as_deref(), Some("cli"));
+        assert_eq!(info.session_id.as_deref(), Some("sess-42"));
+        assert_eq!(info.channel.as_deref(), Some("#dev"));
+        assert_eq!(info.access_count, 0);
+        assert!((info.strength - 1.0).abs() < f64::EPSILON);
+        assert_eq!(info.memory.tags, vec!["technical"]);
+    }
+
+    #[test]
+    fn why_includes_related_facts() {
+        let db = setup_graph_db();
+        // Get the "Alice knows Bob" fact
+        let nodes = db.related("Alice", 1).unwrap();
+        let alice_knows_bob = nodes.iter()
+            .find(|n| {
+                if let MemoryKind::Fact(f) = &n.memory.kind {
+                    f.subject == "Alice" && f.relation == "knows"
+                } else { false }
+            })
+            .expect("should find Alice knows Bob");
+
+        let info = db.why(alice_knows_bob.memory.id).unwrap().expect("should find memory");
+        // "Alice knows Bob" should have related facts via "Alice" and "Bob"
+        assert!(!info.related.is_empty(), "should have related facts");
+    }
+
+    #[test]
+    fn why_returns_none_for_missing_id() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        let result = db.why(99999).unwrap();
+        assert!(result.is_none(), "should return None for non-existent ID");
+    }
+
+    #[test]
+    fn why_episode_has_no_related() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        let mem = db.remember_episode("Had a meeting").unwrap();
+        let info = db.why(mem.id).unwrap().expect("should find episode");
+        assert!(info.related.is_empty(), "episodes should have no graph-related facts");
+    }
+
+    #[test]
+    fn provenance_json_serializable() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        db.remember_fact("A", "r", "B").unwrap();
+        db.remember_fact("B", "r", "C").unwrap();
+        let nodes = db.related("A", 1).unwrap();
+        let a_r_b = &nodes[0];
+        let info = db.why(a_r_b.memory.id).unwrap().unwrap();
+        let json = serde_json::to_string_pretty(&info).unwrap();
+        assert!(json.contains("memory"), "JSON should contain memory field");
+        assert!(json.contains("created_at"), "JSON should contain created_at");
+        assert!(json.contains("strength"), "JSON should contain strength");
     }
 }

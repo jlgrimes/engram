@@ -41,6 +41,13 @@ Run just MCP tests with:
 cargo test -p conch-mcp
 ```
 
+For a lightweight latency trend check of concurrent MCP behavior, run:
+
+```bash
+scripts/benchmark-mcp-concurrency.sh
+# optional: RUNS=10 scripts/benchmark-mcp-concurrency.sh
+```
+
 ## Lint/format checks used in CI
 
 ```bash

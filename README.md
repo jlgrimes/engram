@@ -162,7 +162,7 @@ The MCP server handles lock acquisition failures as tool errors (instead of pani
 
 All relevant MCP tools accept an optional `namespace` field (default comes from `CONCH_NAMESPACE`, then `"default"`). Successful mutation/stat responses also include the effective `namespace` for observability.
 
-`conch-mcp` uses an async `tokio::sync::RwLock` internally (read locks for `recall`/`stats`, write locks for mutating tools) to avoid poisoned-lock panics and reduce async head-of-line blocking.
+`conch-mcp` offloads synchronous DB operations via `tokio::task::spawn_blocking` and maps lock/runtime failures to tool errors, reducing async runtime thread blocking under concurrent calls.
 
 ## Scoring
 

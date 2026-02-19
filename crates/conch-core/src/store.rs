@@ -61,10 +61,10 @@ impl MemoryStore {
         }
 
         self.conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
+            "DROP INDEX IF EXISTS idx_memories_kind_namespace;
+             CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
              CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
              CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
-             CREATE INDEX IF NOT EXISTS idx_memories_kind_namespace ON memories(kind, namespace);
              CREATE INDEX IF NOT EXISTS idx_memories_namespace_kind ON memories(namespace, kind);",
         )?;
         Ok(())
@@ -547,5 +547,105 @@ mod tests {
 
         let other_stats = store.stats_in("other").unwrap();
         assert_eq!(other_stats.total_memories, 0);
+    }
+
+    #[test]
+    fn open_drops_redundant_kind_namespace_index_and_keeps_namespace_kind_index() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    namespace        TEXT NOT NULL DEFAULT 'default',
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX idx_memories_kind_namespace ON memories(kind, namespace);",
+            )
+            .unwrap();
+        }
+
+        let store = MemoryStore::open(path).unwrap();
+
+        let has_kind_namespace_index: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('memories') WHERE name = 'idx_memories_kind_namespace'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_kind_namespace_index, 0);
+
+        let has_namespace_kind_index: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('memories') WHERE name = 'idx_memories_namespace_kind'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_namespace_kind_index, 1);
+    }
+
+    #[test]
+    fn open_drops_redundant_kind_namespace_index() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    namespace        TEXT NOT NULL DEFAULT 'default',
+                    kind             TEXT NOT NULL CHECK(kind IN ('fact', 'episode')),
+                    subject          TEXT,
+                    relation         TEXT,
+                    object           TEXT,
+                    episode_text     TEXT,
+                    strength         REAL NOT NULL DEFAULT 1.0,
+                    embedding        BLOB,
+                    created_at       TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count     INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX idx_memories_kind_namespace ON memories(kind, namespace);",
+            )
+            .unwrap();
+        }
+
+        let store = MemoryStore::open(path).unwrap();
+
+        let redundant_index_count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_memories_kind_namespace'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(redundant_index_count, 0);
+
+        let preferred_index_count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_memories_namespace_kind'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(preferred_index_count, 1);
     }
 }

@@ -230,6 +230,11 @@ impl ConchDB {
         Ok(ExportData { memories })
     }
 
+    pub fn export_in(&self, namespace: &str) -> Result<ExportData, ConchError> {
+        let memories = self.store.all_memories_in(namespace)?;
+        Ok(ExportData { memories })
+    }
+
     pub fn import(&self, data: &ExportData) -> Result<usize, ConchError> {
         let mut count = 0;
         for mem in &data.memories {
@@ -252,6 +257,42 @@ impl ConchDB {
                 MemoryKind::Episode(e) => {
                     self.store.import_episode(
                         &mem.namespace,
+                        &e.text,
+                        mem.strength,
+                        mem.embedding.as_deref(),
+                        &created,
+                        &accessed,
+                        mem.access_count,
+                    )?;
+                }
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub fn import_into(&self, namespace: &str, data: &ExportData) -> Result<usize, ConchError> {
+        let mut count = 0;
+        for mem in &data.memories {
+            let created = mem.created_at.to_rfc3339();
+            let accessed = mem.last_accessed_at.to_rfc3339();
+            match &mem.kind {
+                MemoryKind::Fact(f) => {
+                    self.store.import_fact(
+                        namespace,
+                        &f.subject,
+                        &f.relation,
+                        &f.object,
+                        mem.strength,
+                        mem.embedding.as_deref(),
+                        &created,
+                        &accessed,
+                        mem.access_count,
+                    )?;
+                }
+                MemoryKind::Episode(e) => {
+                    self.store.import_episode(
+                        namespace,
                         &e.text,
                         mem.strength,
                         mem.embedding.as_deref(),
@@ -425,5 +466,85 @@ mod tests {
 
         assert!(db.store().get_memory(a.id).unwrap().is_some());
         assert!(db.store().get_memory(b.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn export_in_returns_only_selected_namespace_memories() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        db.remember_fact_in("team-a", "Rust", "is", "great")
+            .unwrap();
+        db.remember_episode_in("team-a", "alpha episode").unwrap();
+        db.remember_fact_in("team-b", "Go", "is", "fast").unwrap();
+
+        let exported = db.export_in("team-a").unwrap();
+        assert_eq!(exported.memories.len(), 2);
+        assert!(exported.memories.iter().all(|m| m.namespace == "team-a"));
+    }
+
+    #[test]
+    fn import_into_places_memories_in_destination_namespace_and_preserves_fields() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        db.remember_fact_in("source", "Rust", "is", "great")
+            .unwrap();
+        db.remember_episode_in("source", "daily standup happened")
+            .unwrap();
+
+        let mut exported = db.export_in("source").unwrap();
+        assert!(!exported.memories.is_empty());
+
+        for mem in &mut exported.memories {
+            mem.namespace = "wrong-source".to_string();
+        }
+
+        let imported = db.import_into("dest", &exported).unwrap();
+        assert_eq!(imported, exported.memories.len());
+
+        let dest = db.export_in("dest").unwrap();
+        assert_eq!(dest.memories.len(), exported.memories.len());
+        assert!(dest.memories.iter().all(|m| m.namespace == "dest"));
+
+        for imported_mem in &dest.memories {
+            let source_mem = exported
+                .memories
+                .iter()
+                .find(|m| match (&m.kind, &imported_mem.kind) {
+                    (MemoryKind::Fact(f1), MemoryKind::Fact(f2)) => {
+                        f1.subject == f2.subject
+                            && f1.relation == f2.relation
+                            && f1.object == f2.object
+                    }
+                    (MemoryKind::Episode(e1), MemoryKind::Episode(e2)) => e1.text == e2.text,
+                    _ => false,
+                })
+                .unwrap();
+            assert_eq!(imported_mem.strength, source_mem.strength);
+            assert_eq!(imported_mem.created_at, source_mem.created_at);
+            assert_eq!(imported_mem.last_accessed_at, source_mem.last_accessed_at);
+            assert_eq!(imported_mem.access_count, source_mem.access_count);
+            assert_eq!(imported_mem.embedding, source_mem.embedding);
+        }
+    }
+
+    #[test]
+    fn namespace_roundtrip_from_a_to_b_lands_in_b_only() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        db.remember_fact_in("team-a", "Conch", "stores", "memory")
+            .unwrap();
+        db.remember_episode_in("team-c", "unrelated").unwrap();
+
+        let exported_a = db.export_in("team-a").unwrap();
+        let imported = db.import_into("team-b", &exported_a).unwrap();
+
+        assert_eq!(imported, exported_a.memories.len());
+        assert_eq!(db.export_in("team-a").unwrap().memories.len(), 1);
+
+        let team_b = db.export_in("team-b").unwrap();
+        assert_eq!(team_b.memories.len(), 1);
+        assert!(team_b.memories.iter().all(|m| m.namespace == "team-b"));
+
+        assert_eq!(db.export_in("team-c").unwrap().memories.len(), 1);
     }
 }

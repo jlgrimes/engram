@@ -347,6 +347,16 @@ impl MemoryStore {
         rows.collect()
     }
 
+    pub fn all_memories_in(&self, namespace: &str) -> SqlResult<Vec<MemoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, namespace, kind, subject, relation, object, episode_text,
+                    strength, embedding, created_at, last_accessed_at, access_count
+             FROM memories WHERE namespace = ?1",
+        )?;
+        let rows = stmt.query_map(params![namespace], row_to_memory)?;
+        rows.collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn import_fact(
         &self,

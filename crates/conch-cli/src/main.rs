@@ -50,9 +50,9 @@ enum Command {
     Stats,
     /// Generate embeddings for all memories missing them
     Embed,
-    /// Export all memories as JSON to stdout
+    /// Export memories in the selected namespace as JSON to stdout
     Export,
-    /// Import memories from JSON on stdin
+    /// Import memories from JSON on stdin into the selected namespace
     Import,
 }
 
@@ -216,13 +216,13 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Export => {
-            let data = db.export()?;
+            let data = db.export_in(&cli.namespace)?;
             println!("{}", serde_json::to_string_pretty(&data)?);
         }
         Command::Import => {
             let input = std::io::read_to_string(io::stdin())?;
             let data: conch_core::ExportData = serde_json::from_str(&input)?;
-            let count = db.import(&data)?;
+            let count = db.import_into(&cli.namespace, &data)?;
             if cli.json {
                 println!("{}", serde_json::json!({ "imported": count }));
             } else if !cli.quiet {

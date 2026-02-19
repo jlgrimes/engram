@@ -67,11 +67,17 @@ conch stats
 ## Import / export memories
 
 ```bash
-# Export
+# Export default namespace only
 conch export > backup.json
 
-# Import
+# Export a specific namespace
+conch --namespace team-a export > team-a-backup.json
+
+# Import into default namespace
 conch import < backup.json
+
+# Import into a specific namespace (incoming namespace fields are overridden)
+conch --namespace team-a import < backup.json
 
 # Helper script
 bash scripts/import-memories.sh backup.json
@@ -107,11 +113,16 @@ conch --namespace team-a forget --older-than <duration>           # prune old (e
 conch --namespace team-a decay                                    # maintenance pass
 conch --namespace team-a stats                                    # check health
 conch --namespace team-a embed                                    # generate missing embeddings
-conch export                                                      # JSON to stdout
-conch import                                                      # JSON from stdin
+conch --namespace team-a export                                   # JSON to stdout for team-a only
+conch --namespace team-a import                                   # JSON from stdin into team-a
 ```
 
 `--namespace` defaults to `default`, so existing commands still work unchanged.
+
+Namespace behavior for backup/restore:
+- CLI `export` and `import` are namespace-scoped by `--namespace`.
+- `import` always writes into the destination namespace, even if incoming records contain a different `namespace` value.
+- Core API keeps backward-compatible global wrappers: `ConchDB::export()` / `ConchDB::import()` operate on all namespaces, while `export_in()` / `import_into()` are namespace-scoped.
 
 ## MCP Server
 

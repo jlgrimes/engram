@@ -64,7 +64,8 @@ impl MemoryStore {
             "CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(subject);
              CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
              CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
-             CREATE INDEX IF NOT EXISTS idx_memories_kind_namespace ON memories(kind, namespace);",
+             CREATE INDEX IF NOT EXISTS idx_memories_kind_namespace ON memories(kind, namespace);
+             CREATE INDEX IF NOT EXISTS idx_memories_namespace_kind ON memories(namespace, kind);",
         )?;
         Ok(())
     }
@@ -288,8 +289,14 @@ impl MemoryStore {
     }
 
     pub fn forget_by_id(&self, id: &str) -> SqlResult<usize> {
-        self.conn
-            .execute("DELETE FROM memories WHERE id = ?1", params![id])
+        self.forget_by_id_in(DEFAULT_NAMESPACE, id)
+    }
+
+    pub fn forget_by_id_in(&self, namespace: &str, id: &str) -> SqlResult<usize> {
+        self.conn.execute(
+            "DELETE FROM memories WHERE namespace = ?1 AND id = ?2",
+            params![namespace, id],
+        )
     }
 
     pub fn forget_older_than(&self, duration: Duration) -> SqlResult<usize> {

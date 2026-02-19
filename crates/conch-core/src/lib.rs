@@ -177,6 +177,10 @@ impl ConchDB {
         Ok(self.store.forget_by_id(id)?)
     }
 
+    pub fn forget_by_id_in(&self, namespace: &str, id: &str) -> Result<usize, ConchError> {
+        Ok(self.store.forget_by_id_in(namespace, id)?)
+    }
+
     pub fn forget_older_than(&self, secs: i64) -> Result<usize, ConchError> {
         Ok(self.store.forget_older_than(Duration::seconds(secs))?)
     }
@@ -400,5 +404,26 @@ mod tests {
         assert!(recalled
             .iter()
             .all(|r| r.memory.namespace == DEFAULT_NAMESPACE));
+    }
+
+    #[test]
+    fn forget_by_id_is_namespace_scoped() {
+        let db = ConchDB::open_in_memory_with(Box::new(MockEmbedder)).unwrap();
+
+        let a = db
+            .remember_fact_in("agent-a", "Rust", "is", "great")
+            .unwrap();
+        let b = db
+            .remember_fact_in("agent-b", "Rust", "is", "great")
+            .unwrap();
+
+        let deleted_wrong_ns = db.forget_by_id_in("agent-a", &b.id.to_string()).unwrap();
+        assert_eq!(deleted_wrong_ns, 0);
+
+        let deleted_right_ns = db.forget_by_id_in("agent-b", &b.id.to_string()).unwrap();
+        assert_eq!(deleted_right_ns, 1);
+
+        assert!(db.store().get_memory(a.id).unwrap().is_some());
+        assert!(db.store().get_memory(b.id).unwrap().is_none());
     }
 }

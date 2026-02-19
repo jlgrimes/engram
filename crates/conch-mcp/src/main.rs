@@ -555,6 +555,138 @@ mod tests {
         assert_eq!(value["namespace"], "team-b");
         assert!(value["total_memories"].is_number());
     }
+
+    #[tokio::test]
+    async fn concurrent_remember_episode_and_recall_succeeds_without_internal_errors() {
+        let db = ConchDB::open_in_memory_with(Box::new(NoopEmbedder)).expect("db");
+        let server = ConchServer::new(db, "default-ns".to_string());
+        let namespace = "team-concurrency".to_string();
+
+        let seed = server
+            .remember_episode(Parameters(RememberEpisodeParams {
+                namespace: Some(namespace.clone()),
+                text: "seed episode".to_string(),
+            }))
+            .await
+            .expect("seed write should succeed");
+        let seed_outer = serde_json::to_value(&seed).expect("serialize seed result");
+        assert_ne!(seed_outer["isError"], serde_json::Value::Bool(true));
+
+        // Guards against runtime blocking / HOL regressions from inline sync DB work in MCP tools.
+        let remember_server = server.clone();
+        let remember_ns = namespace.clone();
+        let remember_a = tokio::spawn(async move {
+            remember_server
+                .remember_episode(Parameters(RememberEpisodeParams {
+                    namespace: Some(remember_ns),
+                    text: "parallel episode a".to_string(),
+                }))
+                .await
+        });
+
+        let recall_server = server.clone();
+        let recall_ns = namespace.clone();
+        let recall_a = tokio::spawn(async move {
+            recall_server
+                .recall(Parameters(RecallParams {
+                    namespace: Some(recall_ns),
+                    query: "episode".to_string(),
+                    limit: Some(5),
+                    kind: Some("episode".to_string()),
+                    explain: Some(false),
+                    diagnostics: Some(false),
+                }))
+                .await
+        });
+
+        let remember_b = server.remember_episode(Parameters(RememberEpisodeParams {
+            namespace: Some(namespace.clone()),
+            text: "parallel episode b".to_string(),
+        }));
+        let recall_b = server.recall(Parameters(RecallParams {
+            namespace: Some(namespace),
+            query: "parallel".to_string(),
+            limit: Some(5),
+            kind: Some("episode".to_string()),
+            explain: Some(false),
+            diagnostics: Some(false),
+        }));
+
+        let (remember_b_res, recall_b_res, remember_a_join, recall_a_join) =
+            tokio::join!(remember_b, recall_b, remember_a, recall_a);
+
+        let remember_b_res = remember_b_res.expect("inline remember should complete");
+        let recall_b_res = recall_b_res.expect("inline recall should complete");
+        let remember_a_res = remember_a_join
+            .expect("spawned remember task should join")
+            .expect("spawned remember should complete");
+        let recall_a_res = recall_a_join
+            .expect("spawned recall task should join")
+            .expect("spawned recall should complete");
+
+        for result in [
+            &remember_b_res,
+            &recall_b_res,
+            &remember_a_res,
+            &recall_a_res,
+        ] {
+            let outer = serde_json::to_value(result).expect("serialize tool result");
+            assert_ne!(
+                outer["isError"],
+                serde_json::Value::Bool(true),
+                "tool call should not return MCP error payload"
+            );
+            let text = outer["content"][0]["text"]
+                .as_str()
+                .expect("tool payload should include text");
+            assert!(
+                !text.contains("internal error"),
+                "tool payload should not contain internal lock/runtime errors"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_remember_and_recall_calls_succeed() {
+        // Regression guard: MCP handlers should offload blocking DB work so mixed
+        // concurrent remember/recall calls do not surface internal runtime/lock errors.
+        let db = ConchDB::open_in_memory_with(Box::new(NoopEmbedder)).expect("db");
+        let server = ConchServer::new(db, "default-ns".to_string());
+
+        let mut tasks = Vec::new();
+        for i in 0..4 {
+            let s = server.clone();
+            tasks.push(tokio::spawn(async move {
+                s.remember_episode(Parameters(RememberEpisodeParams {
+                    namespace: Some("team-concurrent".to_string()),
+                    text: format!("event-{i}"),
+                }))
+                .await
+                .expect("remember call succeeds")
+            }));
+        }
+        for _ in 0..4 {
+            let s = server.clone();
+            tasks.push(tokio::spawn(async move {
+                s.recall(Parameters(RecallParams {
+                    namespace: Some("team-concurrent".to_string()),
+                    query: "event".to_string(),
+                    limit: Some(5),
+                    kind: Some("episode".to_string()),
+                    explain: Some(false),
+                    diagnostics: Some(false),
+                }))
+                .await
+                .expect("recall call succeeds")
+            }));
+        }
+
+        for task in tasks {
+            let result = task.await.expect("join succeeds");
+            let payload = serde_json::to_string(&result).expect("serialize result");
+            assert!(!payload.contains("internal error"));
+        }
+    }
 }
 
 #[tokio::main]

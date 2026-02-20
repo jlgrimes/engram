@@ -1476,6 +1476,91 @@ mod tests {
         assert_eq!(ns1_mems.len(), 1);
         assert_eq!(ns1_mems[0].namespace, "ns1");
     }
+
+    // ════════════════════════════════════════════════════════════
+    // Audit Log Tamper Evidence Tests (QRT-63 / QRT-70)
+    // ════════════════════════════════════════════════════════════
+
+    /// 1. Genesis entry works: first audit entry has a hash derived from "genesis".
+    #[test]
+    fn audit_hash_genesis_entry_works() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact("A", "B", "C", None).unwrap();
+
+        let log = store.get_audit_log(1, None, None).unwrap();
+        assert_eq!(log.len(), 1);
+        let entry = &log[0];
+        assert!(entry.entry_hash.is_some(), "first entry should have an entry_hash");
+        let hash = entry.entry_hash.as_ref().unwrap();
+        assert!(!hash.is_empty(), "entry_hash must not be empty");
+        // Verify the hash is 64 hex characters (sha256)
+        assert_eq!(hash.len(), 64, "SHA-256 hash should be 64 hex chars");
+    }
+
+    /// 2. Chain builds correctly: sequential entries reference each other's hashes.
+    #[test]
+    fn audit_hash_chain_builds_correctly() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact("A", "B", "C", None).unwrap();
+        store.remember_fact("D", "E", "F", None).unwrap();
+
+        let result = store.verify_audit_integrity().unwrap();
+        assert_eq!(result.total, 2, "should have 2 audit entries");
+        assert_eq!(result.valid, 2, "all entries should be valid");
+        assert!(result.tampered.is_empty(), "no tampering should be detected");
+    }
+
+    /// 3. Multi-entry chain valid: store several entries, verify all pass.
+    #[test]
+    fn audit_hash_multi_entry_chain_valid() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        for i in 0..5 {
+            store.remember_fact(&format!("S{i}"), "R", "O", None).unwrap();
+        }
+        let result = store.verify_audit_integrity().unwrap();
+        assert!(result.total >= 5, "should have at least 5 entries");
+        assert_eq!(result.valid, result.total, "all entries should be valid");
+        assert!(result.tampered.is_empty());
+    }
+
+    /// 4. Tampering detected: modifying an audit entry breaks the chain.
+    #[test]
+    fn audit_hash_tampering_detected() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact("A", "B", "C", None).unwrap();
+        store.remember_fact("D", "E", "F", None).unwrap();
+        store.remember_fact("G", "H", "I", None).unwrap();
+
+        // Tamper with the first audit entry's action
+        store.conn().execute(
+            "UPDATE audit_log SET action = 'tampered_action' WHERE id = (SELECT MIN(id) FROM audit_log)",
+            [],
+        ).unwrap();
+
+        let result = store.verify_audit_integrity().unwrap();
+        assert!(!result.tampered.is_empty(), "tampering should be detected");
+    }
+
+    /// 5. Export includes entry_hash: get_audit_log returns entry_hash field.
+    #[test]
+    fn audit_log_export_includes_entry_hash() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.remember_fact("A", "B", "C", None).unwrap();
+        store.remember_episode("test episode", None).unwrap();
+
+        let log = store.get_audit_log(10, None, None).unwrap();
+        assert!(!log.is_empty());
+        for entry in &log {
+            assert!(
+                entry.entry_hash.is_some(),
+                "all returned audit entries should have entry_hash"
+            );
+        }
+
+        // Verify the hash can be serialized to JSON
+        let json = serde_json::to_string_pretty(&log).unwrap();
+        assert!(json.contains("entry_hash"), "JSON export should contain entry_hash");
+    }
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> SqlResult<MemoryRecord> {

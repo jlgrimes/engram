@@ -188,6 +188,30 @@ conch remember "s" "r" "o"       # store a fact
 conch remember-episode "what"    # store an event
 ```
 
+### Mandatory Storage Triggers
+
+The most common failure mode: the agent has a long session, builds something, names something, and never stores any of it. "Remembering to remember" doesn't work — agents aren't people.
+
+Add this to your `AGENTS.md` to make storage deterministic:
+
+```markdown
+### Mandatory Conch Triggers
+
+You are a system, not a person. These are IF-THEN rules, not aspirations.
+
+| Condition | What to store |
+|-----------|--------------|
+| A project is named | name, concept, stack, repo, location |
+| A tech decision is made | what was decided and why |
+| Something is built and pushed | repo URL, local path, current status |
+| A preference is expressed | the preference, verbatim |
+| A mistake is made | what went wrong + the lesson |
+| A lesson is learned | the lesson |
+| A person, place, or thing is introduced | the key facts |
+
+Before finishing any reply where one of these conditions fired — call conch. Add 🐚 to confirm.
+```
+
 ## Import / Export
 
 ```bash

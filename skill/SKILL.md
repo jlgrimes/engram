@@ -37,6 +37,24 @@ score = RRF(BM25_rank, vector_rank) × strength × recency
 
 Recalled memories get stronger. Unused memories fade. No manual curation needed.
 
+## Mandatory Storage Triggers
+
+You are a system, not a person. You do not have discipline. These are deterministic rules — if the condition is true, store. No exceptions.
+
+| Condition | What to store |
+|-----------|--------------|
+| A project is named | name, concept, stack, repo, location |
+| A tech decision is made | what was decided and why |
+| Something is built and pushed | repo URL, local path, current status |
+| A preference is expressed | the preference, verbatim |
+| A mistake is made | what went wrong + the lesson |
+| A lesson is learned | the lesson |
+| A person, place, or thing is introduced | the key facts |
+
+**Rule:** Before finishing any reply where one of these conditions fired — call conch. Add 🐚 to confirm you stored it.
+
+"Mental notes" don't survive session restarts. Conch does.
+
 ## Tips
 
 - `--json` flag on any command for machine-readable output

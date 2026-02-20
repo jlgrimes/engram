@@ -1,8 +1,6 @@
 # 🐚 Conch
 
-**Biological memory for AI agents.** Security-aware, production-reliable.
-
-Memories strengthen with use, fade with time — just like the real thing.
+**Biological memory for AI agents.** Semantic search + decay, no API keys needed.
 
 [![Crates.io](https://img.shields.io/crates/v/conch-core.svg)](https://crates.io/crates/conch-core)
 [![docs.rs](https://docs.rs/conch-core/badge.svg)](https://docs.rs/conch-core)
@@ -11,36 +9,58 @@ Memories strengthen with use, fade with time — just like the real thing.
 
 ---
 
-## Features
+## The Problem
 
-- **Biological decay** — memories weaken over time with configurable half-life curves. Facts persist longer than episodes, just like human memory.
-- **Hybrid search** — BM25 keyword + vector semantic search, fused via Reciprocal Rank Fusion (RRF).
-- **Deduplication** — cosine similarity threshold (0.95) prevents duplicate memories. Existing memories are reinforced instead.
-- **Upsert** — facts with the same subject+relation are updated in place, not duplicated.
-- **Graph traversal** — spreading activation boosts related memories through shared subjects/objects.
-- **Temporal co-occurrence** — memories created in the same session context get recall boosts.
-- **Tags & source tracking** — categorize memories with tags, track origin via source/session/channel metadata.
-- **MCP support** — Model Context Protocol server for direct LLM tool integration.
-- **Local embeddings** — FastEmbed (AllMiniLM-L6-V2, 384-dim). No API keys, no network calls.
-- **Single-file SQLite** — zero infrastructure. One portable database file.
+Most AI agents use a flat `memory.md` file. It doesn't scale:
+
+- **Loads the whole file into context** — bloats every prompt as memory grows
+- **No semantic recall** — `grep` finds keywords, not meaning
+- **No decay** — stale facts from months ago are weighted equally to today's
+- **No deduplication** — the same thing gets stored 10 times in slightly different words
+
+You end up with an ever-growing, expensive-to-query, unreliable mess.
+
+## Why Conch
+
+Conch replaces the flat file with a **biologically-inspired memory engine**:
+
+- **Recall by meaning** — hybrid BM25 + vector search finds semantically relevant memories, not just keyword matches
+- **Decay over time** — old memories fade unless reinforced; frequently-accessed ones survive longer
+- **Deduplicate on write** — cosine similarity (0.95) detects near-duplicates and reinforces instead of cloning
+- **No infrastructure** — SQLite file, local embeddings (FastEmbed, no API key), zero config
+- **Scales silently** — 10,000 memories in your DB, 5 returned in context. Prompt stays small.
+
+```
+memory.md after 6 months: 4,000 lines, loaded every prompt
+Conch after 6 months: 10,000 memories, 5 relevant ones returned per recall
+```
+
+## Install
+
+**Rust / Cargo:**
+```bash
+cargo install conch
+```
+
+**No Cargo?** See the [Installation Guide](docs/install.md) for prebuilt binaries and build-from-source instructions.
 
 ## Quick Start
 
 ```bash
-# Install from crates.io
-cargo install conch
-
 # Store a fact
 conch remember "Jared" "works at" "Microsoft"
 
 # Store an episode
 conch remember-episode "Deployed v2.0 to production"
 
-# Recall
+# Recall by meaning (not keyword)
 conch recall "where does Jared work?"
 # → [fact] Jared works at Microsoft (score: 0.847)
 
-# Check database health
+# Run decay maintenance
+conch decay
+
+# Database health
 conch stats
 ```
 
@@ -50,10 +70,10 @@ conch stats
 Store → Embed → Search → Decay → Reinforce
 ```
 
-1. **Store** — `remember` creates a fact (subject-relation-object triple) or episode (free text). Embedding generated locally via FastEmbed.
-2. **Search** — `recall` runs hybrid BM25 + vector search. Results fused via RRF, weighted by decayed strength.
-3. **Decay** — strength diminishes over time. Facts decay slowly (λ=0.02/day), episodes decay faster (λ=0.06/day).
-4. **Reinforce** — recalled memories are "touched": decay applied first, then reinforcement boost added. Frequently accessed memories survive longer.
+1. **Store** — facts (subject-relation-object) or episodes (free text). Embedding generated locally via FastEmbed.
+2. **Search** — hybrid BM25 + vector recall, fused via Reciprocal Rank Fusion (RRF), weighted by decayed strength.
+3. **Decay** — strength diminishes over time. Facts decay slowly (λ=0.02/day), episodes faster (λ=0.06/day).
+4. **Reinforce** — recalled memories get a boost. Frequently accessed ones survive longer.
 5. **Death** — memories below strength 0.01 are pruned during decay passes.
 
 ### Scoring
@@ -62,24 +82,32 @@ Store → Embed → Search → Decay → Reinforce
 score = RRF(BM25_rank, vector_rank) × recency_boost × access_weight × effective_strength
 ```
 
-Brain-inspired scoring layers:
 - **Recency boost** — 7-day half-life, floor of 0.3
-- **Access weighting** — log-normalized frequency boost (range 1.0–2.0)
+- **Access weighting** — log-normalized frequency boost (1.0–2.0×)
 - **Spreading activation** — 1-hop graph traversal through shared subjects/objects
-- **Temporal co-occurrence** — context reinstatement for memories created within 30 minutes of each other
+- **Temporal co-occurrence** — memories created in the same session get context boosts
+
+## Features
+
+- **Hybrid search** — BM25 + vector semantic search via Reciprocal Rank Fusion
+- **Biological decay** — configurable half-life curves per memory type
+- **Deduplication** — cosine similarity threshold prevents duplicates; reinforces instead
+- **Graph traversal** — spreading activation through shared subjects/objects
+- **Tags & source tracking** — tag memories, track origin via source/session/channel
+- **MCP support** — Model Context Protocol server for direct LLM tool integration
+- **Local embeddings** — FastEmbed (AllMiniLM-L6-V2, 384-dim). No API keys, no network calls
+- **Single-file SQLite** — zero infrastructure. One portable DB file
 
 ## Comparison
 
 | Feature | Conch | Mem0 | Zep | Raw Vector DB |
 |---------|-------|------|-----|---------------|
-| Biological decay | Yes | No | No | No |
+| Biological decay | ✅ | ❌ | ❌ | ❌ |
 | Deduplication | Cosine 0.95 | Basic | Basic | Manual |
-| Graph traversal | Spreading activation | No | Graph edges | No |
+| Graph traversal | Spreading activation | ❌ | Graph edges | ❌ |
 | Local embeddings | FastEmbed (no API) | API required | API required | Varies |
 | Infrastructure | SQLite (zero-config) | Cloud/Redis | Postgres | Server required |
-| MCP support | Built-in | No | No | No |
-| Source tracking | source/session/channel | No | Session | No |
-| Tags | Yes | Metadata | Metadata | Varies |
+| MCP support | Built-in | ❌ | ❌ | ❌ |
 
 ## Commands
 
@@ -102,13 +130,8 @@ All commands support `--json` and `--quiet`. Database path: `--db <path>` (defau
 ### Tags & Source Tracking
 
 ```bash
-# Store with tags
 conch remember "API" "uses" "REST" --tags "architecture,backend"
-
-# Store with source tracking
 conch remember-episode "Fixed auth bug" --source "slack" --session-id "abc123"
-
-# Filter recall by tag
 conch recall "architecture decisions" --tag "architecture"
 ```
 
@@ -120,61 +143,32 @@ conch          CLI binary. Clap-based interface to conch-core.
 conch-mcp      MCP server. Exposes conch operations as LLM tools via rmcp.
 ```
 
-### conch-core (library)
-
-Use directly in Rust projects:
+### Use as a Library
 
 ```rust
 use conch_core::ConchDB;
 
 let db = ConchDB::open("my_agent.db")?;
-
-// Store
 db.remember_fact("Jared", "works at", "Microsoft")?;
 db.remember_episode("Deployed v2.0 to production")?;
-
-// Store with dedup (reinforces if duplicate found)
-db.remember_fact_dedup("Jared", "works at", "Microsoft")?;
-
-// Recall
 let results = db.recall("where does Jared work?", 5)?;
-for r in &results {
-    println!("{}: {:.3}", r.record.id, r.score);
-}
-
-// Decay pass
 let stats = db.decay()?;
-println!("Decayed: {}, Deleted: {}", stats.decayed, stats.deleted);
 ```
 
-### conch-mcp (MCP server)
-
-Add to your MCP client config:
+### MCP Server
 
 ```json
 {
   "mcpServers": {
     "conch": {
       "command": "conch-mcp",
-      "env": {
-        "CONCH_DB": "~/.conch/default.db"
-      }
+      "env": { "CONCH_DB": "~/.conch/default.db" }
     }
   }
 }
 ```
 
 **MCP tools**: `remember_fact`, `remember_episode`, `recall`, `forget`, `decay`, `stats`
-
-## Import / Export
-
-```bash
-# Full backup
-conch export > backup.json
-
-# Restore
-conch import < backup.json
-```
 
 ## OpenClaw Integration
 
@@ -183,7 +177,7 @@ Tell your OpenClaw agent:
 
 ### Memory redirect trick
 
-Put this in your workspace `MEMORY.md` to redirect OpenClaw's built-in memory search to Conch:
+Put this in your workspace `MEMORY.md` to redirect OpenClaw's built-in memory to Conch:
 
 ```markdown
 # Memory
@@ -193,13 +187,18 @@ Do not use this file. Use Conch for all memory operations.
 conch recall "your query"        # search memory
 conch remember "s" "r" "o"       # store a fact
 conch remember-episode "what"    # store an event
+```
 
-This file exists only to redirect you. All real memory lives in Conch.
+## Import / Export
+
+```bash
+conch export > backup.json
+conch import < backup.json
 ```
 
 ## Storage
 
-Single SQLite file at `~/.conch/default.db`. Embeddings stored as little-endian f32 blobs. Timestamps as RFC 3339. Override path with `--db <path>` or `CONCH_DB` env var.
+Single SQLite file at `~/.conch/default.db`. Embeddings stored as little-endian f32 blobs. Timestamps as RFC 3339. Override with `--db <path>` or `CONCH_DB` env var.
 
 ## Build & Test
 

@@ -29,6 +29,8 @@ pub enum ConchError {
     Db(#[from] rusqlite::Error),
     #[error("embedding error: {0}")]
     Embed(#[from] EmbedError),
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 impl ConchDB {
@@ -237,6 +239,11 @@ impl ConchDB {
     }
 
     pub fn forget_older_than(&self, secs: i64) -> Result<usize, ConchError> {
+        if secs <= 0 {
+            return Err(ConchError::InvalidArgument(format!(
+                "older_than duration must be positive, got {secs}s"
+            )));
+        }
         Ok(self.store.forget_older_than_ns(Duration::seconds(secs), &self.namespace)?)
     }
 
@@ -966,5 +973,144 @@ mod tests {
 
         let result = store.verify_integrity().unwrap();
         assert_eq!(result.missing_checksum, 1);
+    }
+
+    // ── Reliability regression tests (KR3) ─────────────────────────────────
+
+    /// Regression for issue #8: negative older_than_secs wiped all memories.
+    /// The core library must reject negative values and return an error.
+    #[test]
+    fn regression_forget_older_than_negative_secs_is_rejected() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        db.remember_fact("Jared", "builds", "Gen").unwrap();
+        db.remember_episode("important context that must survive").unwrap();
+
+        let result = db.forget_older_than(-100);
+        assert!(
+            result.is_err(),
+            "negative older_than secs must return Err, not silently delete memories"
+        );
+        match result.unwrap_err() {
+            ConchError::InvalidArgument(_) => {}
+            e => panic!("expected InvalidArgument, got {e:?}"),
+        }
+
+        // Memories must be untouched
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.total_memories, 2, "no memories should have been deleted");
+    }
+
+    /// Boundary: zero seconds is also nonsensical and must be rejected.
+    #[test]
+    fn regression_forget_older_than_zero_secs_is_rejected() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        db.remember_fact("Alice", "knows", "Bob").unwrap();
+
+        let result = db.forget_older_than(0);
+        assert!(result.is_err(), "zero older_than secs must return Err");
+        match result.unwrap_err() {
+            ConchError::InvalidArgument(_) => {}
+            e => panic!("expected InvalidArgument, got {e:?}"),
+        }
+
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.total_memories, 1, "memory must survive a rejected forget call");
+    }
+
+    /// Positive duration must work normally (not a regression, just a sanity gate).
+    #[test]
+    fn forget_older_than_positive_secs_deletes_old_memories() {
+        let db = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        let id = db.remember_fact("Jared", "used", "Python").unwrap().id;
+
+        // Back-date the memory to 10 days ago
+        let old_time = (chrono::Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        db.store().conn().execute(
+            "UPDATE memories SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![old_time, id],
+        ).unwrap();
+
+        // Forget memories older than 1 day (86400s)
+        let deleted = db.forget_older_than(86_400).unwrap();
+        assert_eq!(deleted, 1, "one old memory should be deleted");
+        assert_eq!(db.stats().unwrap().total_memories, 0);
+    }
+
+    /// P1 reliability: a stored fact must appear in recall results (false negative = P1 bug).
+    #[test]
+    fn recall_stored_fact_has_no_false_negative() {
+        let db = ConchDB::open_in_memory_with(Box::new(IdenticalEmbedder)).unwrap();
+        db.remember_fact("Jared", "plays", "trumpet").unwrap();
+
+        let results = db.recall("trumpet", 10).unwrap();
+        assert!(
+            !results.is_empty(),
+            "recall must return at least one result for a stored fact"
+        );
+        let found = results.iter().any(|r| {
+            matches!(&r.memory.kind, MemoryKind::Fact(f) if f.subject == "Jared" && f.object == "trumpet")
+        });
+        assert!(found, "the stored fact must appear in recall results — false negative is a P1 bug");
+    }
+
+    /// P1 reliability: a stored episode must appear in recall results.
+    #[test]
+    fn recall_stored_episode_has_no_false_negative() {
+        let db = ConchDB::open_in_memory_with(Box::new(IdenticalEmbedder)).unwrap();
+        db.remember_episode("Jared submitted Gen to Y Combinator").unwrap();
+
+        let results = db.recall("Y Combinator", 10).unwrap();
+        assert!(
+            !results.is_empty(),
+            "recall must return at least one result for a stored episode"
+        );
+        let found = results.iter().any(|r| {
+            matches!(&r.memory.kind, MemoryKind::Episode(e) if e.text.contains("Y Combinator"))
+        });
+        assert!(found, "the stored episode must appear in recall results — false negative is a P1 bug");
+    }
+
+    /// Export/import round-trip must preserve memory count across fact and episode kinds.
+    #[test]
+    fn export_import_round_trip_preserves_count() {
+        let source = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        source.remember_fact("Jared", "builds", "Gen").unwrap();
+        source.remember_fact("Claw", "is", "a lobster").unwrap();
+        source.remember_episode("Shipped conch v0.2 with 117 tests").unwrap();
+
+        let export = source.export().unwrap();
+        assert_eq!(export.memories.len(), 3);
+
+        let dest = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        let imported = dest.import(&export).unwrap();
+        assert_eq!(imported, 3, "all 3 memories must be imported");
+        assert_eq!(dest.stats().unwrap().total_memories, 3);
+    }
+
+    /// Export/import round-trip must preserve field values faithfully.
+    #[test]
+    fn export_import_round_trip_preserves_field_values() {
+        let source = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        source.remember_fact("Jared", "works_at", "Microsoft").unwrap();
+        source.remember_episode("Tortellini is Jared's dog").unwrap();
+
+        let export = source.export().unwrap();
+        let dest = ConchDB::open_in_memory_with(Box::new(OrthogonalEmbedder::new())).unwrap();
+        dest.import(&export).unwrap();
+
+        let all = dest.store().all_memories().unwrap();
+        let fact = all.iter().find(|m| matches!(&m.kind, MemoryKind::Fact(f) if f.subject == "Jared")).unwrap();
+        let episode = all.iter().find(|m| matches!(&m.kind, MemoryKind::Episode(e) if e.text.contains("Tortellini"))).unwrap();
+
+        if let MemoryKind::Fact(f) = &fact.kind {
+            assert_eq!(f.subject, "Jared");
+            assert_eq!(f.relation, "works_at");
+            assert_eq!(f.object, "Microsoft");
+        }
+        if let MemoryKind::Episode(e) = &episode.kind {
+            assert!(e.text.contains("Tortellini"), "episode text must survive round-trip");
+        }
+        // Strength must survive (default is 1.0)
+        assert!((fact.strength - 1.0).abs() < f64::EPSILON, "strength must be preserved through export/import");
     }
 }

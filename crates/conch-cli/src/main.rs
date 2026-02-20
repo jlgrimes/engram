@@ -137,6 +137,9 @@ fn parse_duration_secs(s: &str) -> Result<i64, String> {
     if s.is_empty() { return Err("empty duration".to_string()); }
     let (num_str, suffix) = s.split_at(s.len() - 1);
     let num: i64 = num_str.parse().map_err(|e| format!("invalid number: {e}"))?;
+    if num <= 0 {
+        return Err(format!("duration must be positive, got {num}"));
+    }
     match suffix {
         "s" => Ok(num),
         "m" => Ok(num * 60),

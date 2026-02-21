@@ -6,6 +6,7 @@ pub mod recall;
 pub mod consolidate;
 pub mod importance;
 pub mod validate;
+pub mod isomorphic;
 
 pub use memory::{Episode, ExportData, Fact, GraphNode, MemoryKind, MemoryRecord, MemoryStats, ProvenanceInfo, RememberResult, AuditEntry, VerifyResult, CorruptedMemory, AuditIntegrityResult, TamperedAuditEntry};
 pub use store::MemoryStore;
@@ -15,6 +16,7 @@ pub use recall::{recall, recall_with_tag_filter, RecallResult, RecallError};
 pub use consolidate::{consolidate, find_clusters, ConsolidateResult, ConsolidateCluster};
 pub use importance::{compute_importance, score_all as score_importance, list_importance, ImportanceInfo};
 pub use validate::{ValidationConfig, ValidationEngine, ValidationResult, Violation};
+pub use isomorphic::{isomorphic_recall, IsomorphicRecallResult, IsomorphicResult, RetrievalSource, DEFAULT_MYCELIUM_URL};
 
 use chrono::Duration;
 
@@ -265,6 +267,29 @@ impl ConchDB {
             .map_err(|e| match e {
                 RecallError::Db(e) => ConchError::Db(e),
                 RecallError::Embedding(msg) => ConchError::Embed(EmbedError::Other(msg)),
+            })
+    }
+
+    /// Isomorphic recall: pattern-based retrieval via Mycelium integration.
+    ///
+    /// Unlike standard recall (which finds memories by lexical/vector similarity),
+    /// isomorphic recall first extracts the *structural pattern* of the query using
+    /// Mycelium's cross-domain reasoning engine, then retrieves memories that match
+    /// those patterns — even in completely different domains.
+    ///
+    /// Falls back gracefully to direct recall if Mycelium is unavailable.
+    pub fn recall_isomorphic(
+        &self,
+        query: &str,
+        limit: usize,
+        mycelium_url: &str,
+    ) -> Result<isomorphic::IsomorphicRecallResult, ConchError> {
+        isomorphic::isomorphic_recall(&self.store, query, self.embedder.as_ref(), limit, mycelium_url)
+            .map_err(|e| match e {
+                isomorphic::IsomorphicError::Recall(RecallError::Db(e)) => ConchError::Db(e),
+                isomorphic::IsomorphicError::Recall(RecallError::Embedding(msg)) => {
+                    ConchError::Embed(EmbedError::Other(msg))
+                }
             })
     }
 

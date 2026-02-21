@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use conch_core::{ConchDB, ValidationEngine, ValidationConfig, memory::{MemoryKind, RememberResult}};
+use conch_core::{ConchDB, ValidationEngine, ValidationConfig, DEFAULT_MYCELIUM_URL, isomorphic::RetrievalSource, memory::{MemoryKind, RememberResult}};
 use std::io;
 
 #[derive(Parser)]
@@ -68,6 +68,21 @@ enum Command {
         /// Filter results to only memories with this tag
         #[arg(long)]
         tag: Option<String>,
+    },
+    /// Isomorphic recall: pattern-based retrieval via Mycelium cross-domain reasoning
+    ///
+    /// Unlike standard recall (keyword/vector similarity), this first extracts the
+    /// structural pattern of your query using Mycelium, then finds memories that
+    /// match that pattern — even across completely different domains.
+    ///
+    /// Falls back gracefully to direct recall if Mycelium is unavailable.
+    RecallIsomorphic {
+        query: String,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+        /// Mycelium server URL (default: http://127.0.0.1:8787)
+        #[arg(long)]
+        mycelium_url: Option<String>,
     },
     /// Delete memories
     Forget {
@@ -256,6 +271,57 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
                     match &r.memory.kind {
                         MemoryKind::Fact(f) => println!("[fact] {} {} {} (str: {:.2}, score: {:.3}){tag_suffix}", f.subject, f.relation, f.object, r.memory.strength, r.score),
                         MemoryKind::Episode(e) => println!("[episode] {} (str: {:.2}, score: {:.3}){tag_suffix}", e.text, r.memory.strength, r.score),
+                    }
+                }
+            }
+        }
+        Command::RecallIsomorphic { query, limit, mycelium_url } => {
+            let url = mycelium_url.as_deref().unwrap_or(DEFAULT_MYCELIUM_URL);
+            let result = db.recall_isomorphic(query, *limit, url)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else if !cli.quiet {
+                if result.mycelium_available {
+                    println!("🧠 Isomorphic recall via Mycelium");
+                    println!("  Abstract shape: {}", result.abstract_shape);
+                    if !result.cross_domain_matches.is_empty() {
+                        println!("  Cross-domain analogs:");
+                        for m in &result.cross_domain_matches {
+                            println!("    • {m}");
+                        }
+                    }
+                    if !result.synthesis.is_empty() {
+                        println!("  Synthesis: {}", result.synthesis);
+                    }
+                    println!();
+                } else {
+                    println!("⚠ Mycelium unavailable (start with: cargo run -p mycelium-server)");
+                    println!("  Falling back to direct recall.");
+                    println!();
+                }
+                if result.results.is_empty() {
+                    println!("No memories found.");
+                } else {
+                    for r in &result.results {
+                        let tag_suffix = if r.recall.memory.tags.is_empty() { String::new() } else { format!(" [{}]", r.recall.memory.tags.join(", ")) };
+                        let source_label = match &r.source {
+                            RetrievalSource::Direct => "direct".to_string(),
+                            RetrievalSource::AbstractShape => "pattern".to_string(),
+                            RetrievalSource::Analogy(a) => {
+                                let short = if a.len() > 40 { format!("{}…", &a[..40]) } else { a.clone() };
+                                format!("analogy: {short}")
+                            }
+                        };
+                        match &r.recall.memory.kind {
+                            MemoryKind::Fact(f) => println!(
+                                "[fact/{source_label}] {} {} {} (str: {:.2}, score: {:.3}){tag_suffix}",
+                                f.subject, f.relation, f.object, r.recall.memory.strength, r.recall.score
+                            ),
+                            MemoryKind::Episode(e) => println!(
+                                "[episode/{source_label}] {} (str: {:.2}, score: {:.3}){tag_suffix}",
+                                e.text, r.recall.memory.strength, r.recall.score
+                            ),
+                        }
                     }
                 }
             }

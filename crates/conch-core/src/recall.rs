@@ -185,7 +185,7 @@ pub fn recall_with_tag_filter_ns(
         r.explain.final_score = r.score;
     }
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    sort_recall_results(&mut results);
     results.truncate(limit);
 
     // Touch recalled memories: apply decay first, then reinforce.
@@ -268,6 +268,15 @@ fn spread_activation(results: &mut Vec<RecallResult>, factor: f64) {
     }
 }
 
+fn sort_recall_results(results: &mut [RecallResult]) {
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.memory.id.cmp(&b.memory.id))
+    });
+}
+
 /// Temporal co-occurrence boost: memories created within 30 minutes of a
 /// high-scoring result get a small boost, implementing contextual
 /// reinstatement (Tulving & Thomson, 1973).
@@ -283,6 +292,7 @@ fn temporal_cooccurrence_boost(results: &mut Vec<RecallResult>) {
             .score
             .partial_cmp(&results[a].score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| results[a].memory.id.cmp(&results[b].memory.id))
     });
     let anchor_count = sorted_indices.len().min(5);
     let anchors: Vec<(usize, f64, chrono::DateTime<Utc>)> = sorted_indices[..anchor_count]
@@ -740,6 +750,32 @@ mod tests {
             results[1].score,
             results[2].score
         );
+    }
+
+    #[test]
+    fn sorting_is_deterministic_for_equal_scores() {
+        let now = Utc::now();
+        let mut results = vec![
+            RecallResult {
+                memory: make_timed_episode(10, "alpha a", now),
+                score: 1.0,
+                explain: test_explain(1.0),
+            },
+            RecallResult {
+                memory: make_timed_episode(3, "alpha b", now),
+                score: 1.0,
+                explain: test_explain(1.0),
+            },
+            RecallResult {
+                memory: make_timed_episode(7, "alpha c", now),
+                score: 1.0,
+                explain: test_explain(1.0),
+            },
+        ];
+
+        sort_recall_results(&mut results);
+        let ids: Vec<i64> = results.iter().map(|r| r.memory.id).collect();
+        assert_eq!(ids, vec![3, 7, 10]);
     }
 
     // ── Integration: full pipeline test ──────────────────────

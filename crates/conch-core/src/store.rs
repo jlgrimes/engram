@@ -1599,6 +1599,70 @@ mod tests {
         let json = serde_json::to_string_pretty(&log).unwrap();
         assert!(json.contains("entry_hash"), "JSON export should contain entry_hash");
     }
+
+    #[test]
+    fn write_retry_retries_busy_then_succeeds() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let attempts = std::cell::Cell::new(0usize);
+
+        let result = store.with_write_retry(|| {
+            let n = attempts.get() + 1;
+            attempts.set(n);
+            if n < 3 {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error {
+                        code: rusqlite::ErrorCode::DatabaseBusy,
+                        extended_code: 5,
+                    },
+                    None,
+                ));
+            }
+            Ok(42)
+        });
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts.get(), 3, "should retry twice then succeed");
+    }
+
+    #[test]
+    fn write_retry_does_not_retry_non_retryable_errors() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let attempts = std::cell::Cell::new(0usize);
+
+        let result = store.with_write_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::ConstraintViolation,
+                    extended_code: 2067,
+                },
+                None,
+            ))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1, "non-retryable errors should fail fast");
+    }
+
+    #[test]
+    fn write_retry_stops_after_max_attempts_on_locked() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let attempts = std::cell::Cell::new(0usize);
+
+        let result = store.with_write_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ErrorCode::DatabaseLocked,
+                    extended_code: 6,
+                },
+                None,
+            ))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), WRITE_RETRY_ATTEMPTS);
+    }
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> SqlResult<MemoryRecord> {

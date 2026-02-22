@@ -404,7 +404,60 @@ fn validation_bypass_with_none_config() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 8: Time horizon simulation
+// Test 8: Persistence invariance (restart/reopen consistency)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Data + retry telemetry should remain consistent after closing and reopening DB.
+#[test]
+fn persistence_invariance_across_reopen() {
+    let tmp_path = temp_db_path("persistence");
+
+    // First process/session writes baseline data.
+    {
+        let db = ConchDB::open_path_with_embedder(&tmp_path, Box::new(MockEmbedder::new()), "default").unwrap();
+
+        db.remember_fact("A", "likes", "B").unwrap();
+        db.remember_episode("episode persistence check").unwrap();
+
+        // Simulate stored retry telemetry event from write path.
+        db.store().log_audit(
+            "write_retry",
+            None,
+            "system",
+            Some("{\"status\":\"recovered\",\"operation\":\"remember_fact\",\"retries\":1}"),
+        ).unwrap();
+
+        let stats_before = db.stats().unwrap();
+        assert_eq!(stats_before.total_memories, 2);
+        let verify_before = db.verify().unwrap();
+        assert_eq!(verify_before.valid, 2);
+    }
+
+    // Second process/session reopens same DB file and verifies invariants.
+    {
+        let db = ConchDB::open_path_with_embedder(&tmp_path, Box::new(MockEmbedder::new()), "default").unwrap();
+
+        let stats_after = db.stats().unwrap();
+        assert_eq!(stats_after.total_memories, 2, "memory count must remain stable across reopen");
+        assert_eq!(stats_after.total_facts, 1);
+        assert_eq!(stats_after.total_episodes, 1);
+
+        let verify_after = db.verify().unwrap();
+        assert_eq!(verify_after.valid, 2, "checksums must remain valid after reopen");
+        assert_eq!(verify_after.corrupted.len(), 0);
+
+        let retry_stats = db.write_retry_stats().unwrap();
+        assert_eq!(retry_stats.recovered_events, 1, "retry telemetry must persist across reopen");
+        let op = retry_stats.per_operation.get("remember_fact").unwrap();
+        assert_eq!(op.recovered_events, 1);
+        assert_eq!(op.recovered_retries_total, 1);
+    }
+
+    cleanup_db(&tmp_path);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 9: Time horizon simulation
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Simulate 100 remember/recall/decay cycles: high-access memories survive longer.

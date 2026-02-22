@@ -5,7 +5,7 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration as StdDuration;
 
-use crate::memory::{AuditEntry, AuditIntegrityResult, CorruptedMemory, Episode, Fact, MemoryKind, MemoryRecord, MemoryStats, TamperedAuditEntry, VerifyResult};
+use crate::memory::{AuditEntry, AuditIntegrityResult, CorruptedMemory, Episode, Fact, MemoryKind, MemoryRecord, MemoryStats, TamperedAuditEntry, VerifyResult, WriteRetryStats};
 
 pub struct MemoryStore {
     conn: Connection,
@@ -654,6 +654,38 @@ impl MemoryStore {
         let total_episodes: i64 = self.conn.query_row("SELECT COUNT(*) FROM memories WHERE kind = 'episode' AND namespace = ?1", params![namespace], |r| r.get(0))?;
         let avg_strength: f64 = self.conn.query_row("SELECT COALESCE(AVG(strength), 0.0) FROM memories WHERE namespace = ?1", params![namespace], |r| r.get(0))?;
         Ok(MemoryStats { total_memories, total_facts, total_episodes, avg_strength })
+    }
+
+    /// Aggregate write-retry telemetry from audit log events.
+    pub fn write_retry_stats(&self) -> SqlResult<WriteRetryStats> {
+        let mut stmt = self.conn.prepare(
+            "SELECT details_json FROM audit_log WHERE action = 'write_retry'",
+        )?;
+
+        let rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
+        let mut out = WriteRetryStats::default();
+
+        for row in rows {
+            let Some(details) = row? else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&details) else { continue };
+            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or_default();
+            let retries = v.get("retries").and_then(|r| r.as_u64()).unwrap_or(0) as usize;
+
+            match status {
+                "retrying" => out.retrying_events += 1,
+                "recovered" => {
+                    out.recovered_events += 1;
+                    out.recovered_retries_total += retries;
+                }
+                "failed" => {
+                    out.failed_events += 1;
+                    out.failed_retries_total += retries;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(out)
     }
     // ── Audit Log ─────────────────────────────────────────────
 
@@ -1739,6 +1771,27 @@ mod tests {
                 == Some("failed")
         });
         assert!(has_failed, "expected terminal failed write_retry event");
+    }
+
+    #[test]
+    fn write_retry_stats_aggregate_events() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        store.log_audit("write_retry", None, "system", Some("{\"status\":\"retrying\",\"attempt\":1}"))
+            .unwrap();
+        store.log_audit("write_retry", None, "system", Some("{\"status\":\"retrying\",\"attempt\":2}"))
+            .unwrap();
+        store.log_audit("write_retry", None, "system", Some("{\"status\":\"recovered\",\"retries\":2}"))
+            .unwrap();
+        store.log_audit("write_retry", None, "system", Some("{\"status\":\"failed\",\"retries\":3}"))
+            .unwrap();
+
+        let stats = store.write_retry_stats().unwrap();
+        assert_eq!(stats.retrying_events, 2);
+        assert_eq!(stats.recovered_events, 1);
+        assert_eq!(stats.failed_events, 1);
+        assert_eq!(stats.recovered_retries_total, 2);
+        assert_eq!(stats.failed_retries_total, 3);
     }
 }
 

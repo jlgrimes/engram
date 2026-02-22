@@ -344,11 +344,25 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Stats => {
             let stats = db.stats()?;
-            if cli.json { println!("{}", serde_json::to_string_pretty(&stats)?); }
+            let retry_stats = db.write_retry_stats()?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "memory": stats,
+                    "write_retry": retry_stats,
+                }))?);
+            }
             else if !cli.quiet {
                 println!("Namespace: {}", cli.namespace);
                 println!("Memories: {} ({} facts, {} episodes)", stats.total_memories, stats.total_facts, stats.total_episodes);
                 println!("Avg strength: {:.3}", stats.avg_strength);
+                println!(
+                    "Write-retry telemetry: retrying={}, recovered={}, failed={}, recovered_retries_total={}, failed_retries_total={}",
+                    retry_stats.retrying_events,
+                    retry_stats.recovered_events,
+                    retry_stats.failed_events,
+                    retry_stats.recovered_retries_total,
+                    retry_stats.failed_retries_total,
+                );
             }
         }
         Command::Embed => {

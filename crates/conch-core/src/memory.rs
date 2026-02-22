@@ -60,6 +60,15 @@ pub struct MemoryStats {
     pub avg_strength: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WriteRetryStats {
+    pub retrying_events: usize,
+    pub recovered_events: usize,
+    pub failed_events: usize,
+    pub recovered_retries_total: usize,
+    pub failed_retries_total: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportData {
     pub memories: Vec<MemoryRecord>,

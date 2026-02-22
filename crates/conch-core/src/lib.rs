@@ -8,7 +8,7 @@ pub mod importance;
 pub mod validate;
 pub mod isomorphic;
 
-pub use memory::{Episode, ExportData, Fact, GraphNode, MemoryKind, MemoryRecord, MemoryStats, ProvenanceInfo, RememberResult, AuditEntry, VerifyResult, CorruptedMemory, AuditIntegrityResult, TamperedAuditEntry};
+pub use memory::{Episode, ExportData, Fact, GraphNode, MemoryKind, MemoryRecord, MemoryStats, ProvenanceInfo, RememberResult, AuditEntry, VerifyResult, CorruptedMemory, AuditIntegrityResult, TamperedAuditEntry, WriteRetryStats};
 pub use store::MemoryStore;
 pub use embed::{Embedder, EmbedError, FastEmbedder, SharedEmbedder, cosine_similarity};
 pub use decay::{run_decay, DecayResult};
@@ -316,6 +316,10 @@ impl ConchDB {
 
     pub fn stats(&self) -> Result<MemoryStats, ConchError> {
         Ok(self.store.stats_ns(&self.namespace)?)
+    }
+
+    pub fn write_retry_stats(&self) -> Result<WriteRetryStats, ConchError> {
+        Ok(self.store.write_retry_stats()?)
     }
 
     pub fn embed_all(&self) -> Result<usize, ConchError> {

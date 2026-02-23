@@ -3,22 +3,22 @@ type SearchParams = Promise<{ submitted?: string; error?: string }>;
 const pricingTiers = [
   {
     name: "Starter",
-    detail: "For solo builders and prototypes.",
+    detail: "Reliability baseline: memory audit + top-risk fixes.",
   },
   {
     name: "Growth",
-    detail: "For product teams shipping production memory.",
+    detail: "Production hardening: recall quality, retries, and observability.",
   },
   {
     name: "Enterprise",
-    detail: "For high-scale memory governance and support.",
+    detail: "Custom rollout with governance, SLOs, and enablement.",
   },
 ];
 
 const proofItems = [
-  "Semantic recall with reinforcement + decay",
-  "Explainable recall exports and ranking diagnostics",
-  "Reliability tooling for production memory operations",
+  "Time-window recall improvements (today/yesterday/last 24h)",
+  "Snapshot drift comparison + pagination for regression triage",
+  "Action-event + daily rollup memory ingestion pipeline",
 ];
 
 export default async function Home({ searchParams }: { searchParams: SearchParams }) {
@@ -29,16 +29,16 @@ export default async function Home({ searchParams }: { searchParams: SearchParam
   return (
     <main className="page-shell">
       <header className="hero card">
-        <p className="eyebrow">Conch App</p>
-        <h1>Memory infrastructure for production AI agents.</h1>
+        <p className="eyebrow">Conch Reliability</p>
+        <h1>Fix memory reliability before it burns your product in production.</h1>
         <p className="lead">
-          Durable semantic memory with biologically inspired decay and reinforcement so agent context stays useful as your product scales.
+          We help teams ship AI memory that is auditable, resilient under load, and actually useful in live user workflows.
         </p>
         <div className="cta-row">
           <a href="https://conch.lol/reliability" className="primary-btn">
-            View reliability
+            See engagement details
           </a>
-          <span className="cta-note">Use this portal to request onboarding.</span>
+          <span className="cta-note">Request onboarding and we’ll respond with next steps fast.</span>
         </div>
       </header>
 

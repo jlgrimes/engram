@@ -85,7 +85,11 @@ pub fn find_clusters(
             continue;
         }
         // Pick the strongest as canonical
-        members.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+        members.sort_by(|a, b| {
+            b.strength
+                .partial_cmp(&a.strength)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let canonical = members.remove(0);
         result.push(ConsolidateCluster {
             canonical,
@@ -148,13 +152,23 @@ mod tests {
     fn find_clusters_groups_similar_embeddings() {
         let store = MemoryStore::open_in_memory().unwrap();
         // Two very similar embeddings (same direction)
-        store.remember_fact("A", "is", "B", Some(&[1.0, 0.0, 0.0])).unwrap();
-        store.remember_fact("A", "is", "C", Some(&[0.99, 0.1, 0.0])).unwrap();
+        store
+            .remember_fact("A", "is", "B", Some(&[1.0, 0.0, 0.0]))
+            .unwrap();
+        store
+            .remember_fact("A", "is", "C", Some(&[0.99, 0.1, 0.0]))
+            .unwrap();
         // One very different embedding
-        store.remember_fact("X", "is", "Y", Some(&[0.0, 0.0, 1.0])).unwrap();
+        store
+            .remember_fact("X", "is", "Y", Some(&[0.0, 0.0, 1.0]))
+            .unwrap();
 
         let clusters = find_clusters(&store, Some(0.80)).unwrap();
-        assert_eq!(clusters.len(), 1, "should find 1 cluster of 2 similar memories");
+        assert_eq!(
+            clusters.len(),
+            1,
+            "should find 1 cluster of 2 similar memories"
+        );
         assert_eq!(clusters[0].duplicates.len(), 1);
     }
 
@@ -162,20 +176,45 @@ mod tests {
     fn find_clusters_returns_empty_for_dissimilar() {
         let store = MemoryStore::open_in_memory().unwrap();
         // All orthogonal embeddings
-        store.remember_fact("A", "is", "B", Some(&[1.0, 0.0, 0.0])).unwrap();
-        store.remember_fact("C", "is", "D", Some(&[0.0, 1.0, 0.0])).unwrap();
-        store.remember_fact("E", "is", "F", Some(&[0.0, 0.0, 1.0])).unwrap();
+        store
+            .remember_fact("A", "is", "B", Some(&[1.0, 0.0, 0.0]))
+            .unwrap();
+        store
+            .remember_fact("C", "is", "D", Some(&[0.0, 1.0, 0.0]))
+            .unwrap();
+        store
+            .remember_fact("E", "is", "F", Some(&[0.0, 0.0, 1.0]))
+            .unwrap();
 
         let clusters = find_clusters(&store, Some(0.80)).unwrap();
-        assert!(clusters.is_empty(), "should find no clusters for orthogonal embeddings");
+        assert!(
+            clusters.is_empty(),
+            "should find no clusters for orthogonal embeddings"
+        );
     }
 
     #[test]
     fn consolidate_merges_tags_and_archives() {
         let store = MemoryStore::open_in_memory().unwrap();
         // Two similar memories with different tags
-        let _id1 = store.remember_fact_with_tags("A", "is", "B", Some(&[1.0, 0.0, 0.0]), &["tag1".to_string()]).unwrap();
-        let _id2 = store.remember_fact_with_tags("A", "is", "C", Some(&[0.99, 0.1, 0.0]), &["tag2".to_string()]).unwrap();
+        let _id1 = store
+            .remember_fact_with_tags(
+                "A",
+                "is",
+                "B",
+                Some(&[1.0, 0.0, 0.0]),
+                &["tag1".to_string()],
+            )
+            .unwrap();
+        let _id2 = store
+            .remember_fact_with_tags(
+                "A",
+                "is",
+                "C",
+                Some(&[0.99, 0.1, 0.0]),
+                &["tag2".to_string()],
+            )
+            .unwrap();
 
         let result = consolidate(&store, Some(0.80)).unwrap();
         assert_eq!(result.clusters, 1);
@@ -195,18 +234,28 @@ mod tests {
     #[test]
     fn consolidate_picks_strongest_as_canonical() {
         let store = MemoryStore::open_in_memory().unwrap();
-        let id1 = store.remember_fact("weak", "is", "memory", Some(&[1.0, 0.0, 0.0])).unwrap();
-        let id2 = store.remember_fact("strong", "is", "memory", Some(&[0.99, 0.1, 0.0])).unwrap();
+        let id1 = store
+            .remember_fact("weak", "is", "memory", Some(&[1.0, 0.0, 0.0]))
+            .unwrap();
+        let id2 = store
+            .remember_fact("strong", "is", "memory", Some(&[0.99, 0.1, 0.0]))
+            .unwrap();
 
         // Make id2 stronger
-        store.conn().execute(
-            "UPDATE memories SET strength = 0.9 WHERE id = ?1",
-            rusqlite::params![id1],
-        ).unwrap();
-        store.conn().execute(
-            "UPDATE memories SET strength = 1.0 WHERE id = ?1",
-            rusqlite::params![id2],
-        ).unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET strength = 0.9 WHERE id = ?1",
+                rusqlite::params![id1],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET strength = 1.0 WHERE id = ?1",
+                rusqlite::params![id2],
+            )
+            .unwrap();
 
         let result = consolidate(&store, Some(0.80)).unwrap();
         assert_eq!(result.clusters, 1);
@@ -219,8 +268,12 @@ mod tests {
     #[test]
     fn consolidate_dry_run_via_find_clusters() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.remember_fact("A", "is", "B", Some(&[1.0, 0.0, 0.0])).unwrap();
-        store.remember_fact("A", "is", "C", Some(&[0.99, 0.1, 0.0])).unwrap();
+        store
+            .remember_fact("A", "is", "B", Some(&[1.0, 0.0, 0.0]))
+            .unwrap();
+        store
+            .remember_fact("A", "is", "C", Some(&[0.99, 0.1, 0.0]))
+            .unwrap();
 
         // Dry run: just find clusters without consolidating
         let clusters = find_clusters(&store, Some(0.80)).unwrap();

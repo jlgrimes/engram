@@ -52,6 +52,16 @@ struct RememberActionParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct RememberIntentParams {
+    text: String,
+    tags: Option<String>,
+    source: Option<String>,
+    session_id: Option<String>,
+    channel: Option<String>,
+    namespace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct RecallParams {
     query: String,
     limit: Option<usize>,
@@ -155,6 +165,7 @@ impl From<RecallResult> for MemoryResponse {
             ),
             MemoryKind::Episode(e) => ("episode".into(), e.text.clone()),
             MemoryKind::Action(a) => ("action".into(), a.text.clone()),
+            MemoryKind::Intent(i) => ("intent".into(), i.text.clone()),
         };
         MemoryResponse {
             id: r.memory.id,
@@ -285,6 +296,29 @@ impl ConchServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
         match conch.remember_action_full(&p.text, &tags, source, p.session_id.as_deref(), p.channel.as_deref()) {
+            Ok(mem) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::json!({ "id": mem.id, "strength": mem.strength, "tags": mem.tags, "source": mem.source, "namespace": mem.namespace }).to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(
+        name = "remember_intent",
+        description = "Store an intent (future plan/intention). Supports namespace isolation."
+    )]
+    async fn remember_intent(
+        &self,
+        params: Parameters<RememberIntentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let tags = parse_tags_mcp(p.tags.as_deref());
+        let source = Some(p.source.as_deref().unwrap_or("mcp"));
+        let conch = match self.open_db(p.namespace.as_deref()) {
+            Ok(c) => c,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        };
+        match conch.remember_intent_full(&p.text, &tags, source, p.session_id.as_deref(), p.channel.as_deref()) {
             Ok(mem) => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::json!({ "id": mem.id, "strength": mem.strength, "tags": mem.tags, "source": mem.source, "namespace": mem.namespace }).to_string(),
             )])),

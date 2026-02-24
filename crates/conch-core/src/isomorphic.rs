@@ -126,7 +126,10 @@ pub fn isomorphic_recall(
                        items: Vec<RecallResult>| {
         for r in items {
             if seen.insert(r.memory.id) {
-                all.push(IsomorphicResult { recall: r, source: source.clone() });
+                all.push(IsomorphicResult {
+                    recall: r,
+                    source: source.clone(),
+                });
             }
         }
     };
@@ -134,7 +137,12 @@ pub fn isomorphic_recall(
     // 1. Direct recall — always runs.
     let overfetch = (limit * 3).max(20);
     let direct = recall(store, query, embedder, overfetch)?;
-    add_results(&mut all_results, &mut seen_ids, RetrievalSource::Direct, direct);
+    add_results(
+        &mut all_results,
+        &mut seen_ids,
+        RetrievalSource::Direct,
+        direct,
+    );
 
     // 2. If Mycelium responded, add abstract-shape recall and analog recalls.
     let (abstract_shape, cross_domain_matches, synthesis) = if let Some(ref mres) = mycelium {
@@ -174,7 +182,8 @@ pub fn isomorphic_recall(
 
     // Sort by score descending, truncate to limit.
     all_results.sort_by(|a, b| {
-        b.recall.score
+        b.recall
+            .score
             .partial_cmp(&a.recall.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -234,12 +243,21 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!result.mycelium_available, "Mycelium should be marked unavailable");
+        assert!(
+            !result.mycelium_available,
+            "Mycelium should be marked unavailable"
+        );
         assert_eq!(result.abstract_shape, "", "abstract_shape should be empty");
         assert!(result.cross_domain_matches.is_empty());
-        assert!(!result.results.is_empty(), "should still return direct recall results");
         assert!(
-            result.results.iter().all(|r| r.source == RetrievalSource::Direct),
+            !result.results.is_empty(),
+            "should still return direct recall results"
+        );
+        assert!(
+            result
+                .results
+                .iter()
+                .all(|r| r.source == RetrievalSource::Direct),
             "all results should be Direct when Mycelium is down"
         );
     }
@@ -264,7 +282,10 @@ mod tests {
 
         for r in result1 {
             if seen.insert(r.memory.id) {
-                merged.push(IsomorphicResult { recall: r, source: RetrievalSource::Direct });
+                merged.push(IsomorphicResult {
+                    recall: r,
+                    source: RetrievalSource::Direct,
+                });
             }
         }
         for r in result2 {
@@ -277,7 +298,11 @@ mod tests {
         }
 
         assert_eq!(merged.len(), 1, "duplicate memory should appear only once");
-        assert_eq!(merged[0].source, RetrievalSource::Direct, "first-seen source wins");
+        assert_eq!(
+            merged[0].source,
+            RetrievalSource::Direct,
+            "first-seen source wins"
+        );
     }
 
     /// Empty store should return empty results without panicking.
@@ -307,14 +332,8 @@ mod tests {
                 .unwrap();
         }
 
-        let result = isomorphic_recall(
-            &store,
-            "alpha",
-            &MockEmbedder,
-            5,
-            "http://127.0.0.1:19999",
-        )
-        .unwrap();
+        let result =
+            isomorphic_recall(&store, "alpha", &MockEmbedder, 5, "http://127.0.0.1:19999").unwrap();
 
         assert!(
             result.results.len() <= 5,

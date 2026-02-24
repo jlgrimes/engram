@@ -21,6 +21,7 @@ thiserror = "2"
 bm25 = "2"
 sha2 = "0.10"
 ureq = { version = "2", features = ["json"] }
+chrono-tz = "0.10"
 
 [dev-dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }

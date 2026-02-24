@@ -6,9 +6,9 @@ use std::thread::sleep;
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::memory::{
-    AuditEntry, AuditIntegrityResult, CorruptedMemory, Episode, Fact, Action, MemoryKind, MemoryRecord,
-    MemoryStats, OperationWriteRetryStats, TamperedAuditEntry, TemporalMetadata, VerifyResult,
-    WriteRetryStats,
+    Action, AuditEntry, AuditIntegrityResult, CorruptedMemory, Episode, Fact, Intent, MemoryKind,
+    MemoryRecord, MemoryStats, OperationWriteRetryStats, TamperedAuditEntry, TemporalMetadata,
+    VerifyResult, WriteRetryStats,
 };
 use crate::temporal::extract_temporal_metadata;
 
@@ -45,7 +45,7 @@ impl MemoryStore {
             "PRAGMA busy_timeout = 5000;
             CREATE TABLE IF NOT EXISTS memories (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind            TEXT NOT NULL CHECK(kind IN ('fact', 'episode', 'action')),
+                kind            TEXT NOT NULL CHECK(kind IN ('fact', 'episode', 'action', 'intent')),
                 subject         TEXT,
                 relation        TEXT,
                 object          TEXT,
@@ -124,6 +124,49 @@ impl MemoryStore {
             self.conn
                 .execute_batch("ALTER TABLE memories ADD COLUMN temporal_json TEXT;")?;
         }
+        // Migration: widen kind check constraint to include intent by rebuilding table if needed.
+        let create_sql: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(sql) = create_sql {
+            if sql.contains("CHECK(kind IN ('fact', 'episode', 'action'))") {
+                self.conn.execute_batch(
+                    "BEGIN;
+                    CREATE TABLE memories_new (
+                        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                        kind            TEXT NOT NULL CHECK(kind IN ('fact', 'episode', 'action', 'intent')),
+                        subject         TEXT,
+                        relation        TEXT,
+                        object          TEXT,
+                        episode_text    TEXT,
+                        strength        REAL NOT NULL DEFAULT 1.0,
+                        embedding       BLOB,
+                        created_at      TEXT NOT NULL,
+                        last_accessed_at TEXT NOT NULL,
+                        access_count    INTEGER NOT NULL DEFAULT 0,
+                        tags            TEXT NOT NULL DEFAULT '',
+                        source          TEXT,
+                        session_id      TEXT,
+                        channel         TEXT,
+                        importance      REAL NOT NULL DEFAULT 0.5,
+                        namespace       TEXT NOT NULL DEFAULT 'default',
+                        checksum        TEXT,
+                        temporal_json   TEXT
+                    );
+                    INSERT INTO memories_new (id, kind, subject, relation, object, episode_text, strength, embedding, created_at, last_accessed_at, access_count, tags, source, session_id, channel, importance, namespace, checksum, temporal_json)
+                    SELECT id, kind, subject, relation, object, episode_text, strength, embedding, created_at, last_accessed_at, access_count, COALESCE(tags,''), source, session_id, channel, COALESCE(importance,0.5), COALESCE(namespace,'default'), checksum, temporal_json FROM memories;
+                    DROP TABLE memories;
+                    ALTER TABLE memories_new RENAME TO memories;
+                    COMMIT;",
+                )?;
+            }
+        }
+
         // Audit log table
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_log (
@@ -395,7 +438,16 @@ impl MemoryStore {
                      checksum = ?8, temporal_json = ?9 \
                      WHERE id = ?10",
                     params![
-                        object, emb_blob, now, tags_str, source, session_id, channel, checksum, temporal_json, id
+                        object,
+                        emb_blob,
+                        now,
+                        tags_str,
+                        source,
+                        session_id,
+                        channel,
+                        checksum,
+                        temporal_json,
+                        id
                     ],
                 )
             })?;
@@ -519,7 +571,9 @@ impl MemoryStore {
         session_id: Option<&str>,
         channel: Option<&str>,
     ) -> SqlResult<i64> {
-        self.remember_action_ns(text, embedding, tags, source, session_id, channel, "default")
+        self.remember_action_ns(
+            text, embedding, tags, source, session_id, channel, "default",
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -552,6 +606,70 @@ impl MemoryStore {
             "system",
             Some(&format!(
                 "{{\"kind\":\"action\",\"namespace\":{}}}",
+                serde_json::json!(namespace)
+            )),
+        )?;
+        Ok(id)
+    }
+
+    pub fn remember_intent(&self, text: &str, embedding: Option<&[f32]>) -> SqlResult<i64> {
+        self.remember_intent_with_tags(text, embedding, &[])
+    }
+
+    pub fn remember_intent_with_tags(
+        &self,
+        text: &str,
+        embedding: Option<&[f32]>,
+        tags: &[String],
+    ) -> SqlResult<i64> {
+        self.remember_intent_full(text, embedding, tags, None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_intent_full(
+        &self,
+        text: &str,
+        embedding: Option<&[f32]>,
+        tags: &[String],
+        source: Option<&str>,
+        session_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> SqlResult<i64> {
+        self.remember_intent_ns(
+            text, embedding, tags, source, session_id, channel, "default",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_intent_ns(
+        &self,
+        text: &str,
+        embedding: Option<&[f32]>,
+        tags: &[String],
+        source: Option<&str>,
+        session_id: Option<&str>,
+        channel: Option<&str>,
+        namespace: &str,
+    ) -> SqlResult<i64> {
+        let now = Utc::now().to_rfc3339();
+        let emb_blob = embedding.map(embedding_to_blob);
+        let tags_str = tags.join(",");
+        let checksum = compute_checksum(text);
+
+        self.with_write_retry("remember_intent", || {
+            self.conn.execute(
+                "INSERT INTO memories (kind, episode_text, embedding, created_at, last_accessed_at, tags, source, session_id, channel, namespace, checksum, temporal_json)
+                 VALUES ('intent', ?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![text, emb_blob, now, tags_str, source, session_id, channel, namespace, checksum, Option::<String>::None],
+            )
+        })?;
+        let id = self.conn.last_insert_rowid();
+        self.log_audit(
+            "remember",
+            Some(id),
+            "system",
+            Some(&format!(
+                "{{\"kind\":\"intent\",\"namespace\":{}}}",
                 serde_json::json!(namespace)
             )),
         )?;
@@ -785,11 +903,10 @@ impl MemoryStore {
     }
 
     pub fn forget_by_id(&self, id: &str) -> SqlResult<usize> {
-        let changed =
-            self.with_write_retry("forget_by_id", || {
-                self.conn
-                    .execute("DELETE FROM memories WHERE id = ?1", params![id])
-            })?;
+        let changed = self.with_write_retry("forget_by_id", || {
+            self.conn
+                .execute("DELETE FROM memories WHERE id = ?1", params![id])
+        })?;
         if changed > 0 {
             self.log_audit(
                 "forget",
@@ -995,7 +1112,6 @@ impl MemoryStore {
         Ok(self.conn.last_insert_rowid())
     }
 
-
     #[allow(clippy::too_many_arguments)]
     pub fn import_action_ns(
         &self,
@@ -1018,6 +1134,33 @@ impl MemoryStore {
         self.conn.execute(
             "INSERT INTO memories (kind, episode_text, strength, embedding, created_at, last_accessed_at, access_count, tags, source, session_id, channel, namespace, checksum, temporal_json)
              VALUES ('action', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![text, strength, emb_blob, created_at, last_accessed_at, access_count, tags_str, source, session_id, channel, namespace, checksum, temporal_json],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn import_intent_ns(
+        &self,
+        text: &str,
+        strength: f64,
+        embedding: Option<&[f32]>,
+        created_at: &str,
+        last_accessed_at: &str,
+        access_count: i64,
+        tags: &[String],
+        source: Option<&str>,
+        session_id: Option<&str>,
+        channel: Option<&str>,
+        namespace: &str,
+    ) -> SqlResult<i64> {
+        let emb_blob = embedding.map(embedding_to_blob);
+        let tags_str = tags.join(",");
+        let checksum = compute_checksum(text);
+        let temporal_json: Option<String> = None;
+        self.conn.execute(
+            "INSERT INTO memories (kind, episode_text, strength, embedding, created_at, last_accessed_at, access_count, tags, source, session_id, channel, namespace, checksum, temporal_json)
+             VALUES ('intent', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![text, strength, emb_blob, created_at, last_accessed_at, access_count, tags_str, source, session_id, channel, namespace, checksum, temporal_json],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -1144,6 +1287,11 @@ impl MemoryStore {
             params![namespace],
             |r| r.get(0),
         )?;
+        let total_intents: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE kind = 'intent' AND namespace = ?1",
+            params![namespace],
+            |r| r.get(0),
+        )?;
         let avg_strength: f64 = self.conn.query_row(
             "SELECT COALESCE(AVG(strength), 0.0) FROM memories WHERE namespace = ?1",
             params![namespace],
@@ -1154,6 +1302,7 @@ impl MemoryStore {
             total_facts,
             total_episodes,
             total_actions,
+            total_intents,
             avg_strength,
         })
     }
@@ -1423,6 +1572,7 @@ impl MemoryStore {
                     relation.as_deref().unwrap_or(""),
                     object.as_deref().unwrap_or("")
                 ),
+                "action" | "intent" | "episode" => episode_text.unwrap_or_default(),
                 _ => episode_text.unwrap_or_default(),
             };
             let actual_checksum = compute_checksum(&content);
@@ -2830,6 +2980,41 @@ mod tests {
         let mem = store.get_memory(id).unwrap().unwrap();
         assert!(mem.temporal.is_none());
     }
+
+    #[test]
+    fn legacy_kind_constraint_is_upgraded_to_include_intent() {
+        let path = format!(
+            "/tmp/conch-intent-migration-{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind            TEXT NOT NULL CHECK(kind IN ('fact', 'episode', 'action')),
+                subject         TEXT,
+                relation        TEXT,
+                object          TEXT,
+                episode_text    TEXT,
+                strength        REAL NOT NULL DEFAULT 1.0,
+                embedding       BLOB,
+                created_at      TEXT NOT NULL,
+                last_accessed_at TEXT NOT NULL,
+                access_count    INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::open(&path).unwrap();
+        let id = store.remember_intent("plan migration", None).unwrap();
+        let mem = store.get_memory(id).unwrap().unwrap();
+        assert!(matches!(mem.kind, MemoryKind::Intent(_)));
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> SqlResult<MemoryRecord> {
@@ -2843,7 +3028,13 @@ fn row_to_memory(row: &rusqlite::Row) -> SqlResult<MemoryRecord> {
         "episode" => MemoryKind::Episode(Episode {
             text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
         }),
-        _ => MemoryKind::Action(Action {
+        "action" => MemoryKind::Action(Action {
+            text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        }),
+        "intent" => MemoryKind::Intent(Intent {
+            text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        }),
+        _ => MemoryKind::Episode(Episode {
             text: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
         }),
     };

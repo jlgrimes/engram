@@ -51,6 +51,10 @@ pub fn compute_importance(mem: &MemoryRecord) -> f64 {
             let len = a.text.len() as f64;
             (len / 250.0).min(0.8)
         }
+        MemoryKind::Intent(i) => {
+            let len = i.text.len() as f64;
+            (len / 250.0).min(0.8)
+        }
     };
     score += 0.35 * content_factor;
     weights += 0.35;

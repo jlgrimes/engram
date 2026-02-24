@@ -19,10 +19,16 @@ pub struct Action {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Intent {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MemoryKind {
     Fact(Fact),
     Episode(Episode),
     Action(Action),
+    Intent(Intent),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +95,8 @@ pub struct MemoryStats {
     pub total_episodes: i64,
     #[serde(default)]
     pub total_actions: i64,
+    #[serde(default)]
+    pub total_intents: i64,
     pub avg_strength: f64,
 }
 
@@ -252,13 +260,14 @@ impl MemoryRecord {
             MemoryKind::Fact(f) => format!("{} {} {}", f.subject, f.relation, f.object),
             MemoryKind::Episode(e) => e.text.clone(),
             MemoryKind::Action(a) => a.text.clone(),
+            MemoryKind::Intent(i) => i.text.clone(),
         }
     }
 
     pub fn subject(&self) -> Option<&str> {
         match &self.kind {
             MemoryKind::Fact(f) => Some(&f.subject),
-            MemoryKind::Episode(_) | MemoryKind::Action(_) => None,
+            MemoryKind::Episode(_) | MemoryKind::Action(_) | MemoryKind::Intent(_) => None,
         }
     }
 
@@ -266,7 +275,7 @@ impl MemoryRecord {
     pub fn object(&self) -> Option<&str> {
         match &self.kind {
             MemoryKind::Fact(f) => Some(&f.object),
-            MemoryKind::Episode(_) | MemoryKind::Action(_) => None,
+            MemoryKind::Episode(_) | MemoryKind::Action(_) | MemoryKind::Intent(_) => None,
         }
     }
 }

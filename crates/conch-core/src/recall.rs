@@ -295,8 +295,14 @@ fn recency_boost(mem: &MemoryRecord, now: chrono::DateTime<Utc>) -> f64 {
     let hours_ago = (now - mem.created_at).num_seconds().max(0) as f64 / 3600.0;
     let raw = 1.0 / (1.0 + (hours_ago / RECENCY_HALF_LIFE_HOURS).powf(0.8));
     let kind_multiplier = match &mem.kind {
-        MemoryKind::Action(_) => {
-            if hours_ago <= 48.0 { 1.35 } else if hours_ago <= 24.0 * 7.0 { 1.10 } else { 0.75 }
+        MemoryKind::Action(_) | MemoryKind::Intent(_) => {
+            if hours_ago <= 48.0 {
+                1.35
+            } else if hours_ago <= 24.0 * 7.0 {
+                1.10
+            } else {
+                0.75
+            }
         }
         _ => 1.0,
     };
@@ -447,7 +453,7 @@ fn kind_decay_lambda_per_day(mem: &MemoryRecord) -> f64 {
     match &mem.kind {
         MemoryKind::Fact(_) => FACT_DECAY_LAMBDA_PER_DAY,
         MemoryKind::Episode(_) => EPISODE_DECAY_LAMBDA_PER_DAY,
-        MemoryKind::Action(_) => ACTION_DECAY_LAMBDA_PER_DAY,
+        MemoryKind::Action(_) | MemoryKind::Intent(_) => ACTION_DECAY_LAMBDA_PER_DAY,
     }
 }
 
@@ -455,7 +461,7 @@ fn touch_boost(mem: &MemoryRecord) -> f64 {
     match &mem.kind {
         MemoryKind::Fact(_) => FACT_TOUCH_BOOST,
         MemoryKind::Episode(_) => EPISODE_TOUCH_BOOST,
-        MemoryKind::Action(_) => ACTION_TOUCH_BOOST,
+        MemoryKind::Action(_) | MemoryKind::Intent(_) => ACTION_TOUCH_BOOST,
     }
 }
 
@@ -522,24 +528,52 @@ fn temporal_relevance_multiplier(mem: &MemoryRecord, now: chrono::DateTime<Utc>)
     }
 }
 
-fn operational_salience_multiplier(mem: &MemoryRecord, query: &str, now: chrono::DateTime<Utc>) -> f64 {
+fn operational_salience_multiplier(
+    mem: &MemoryRecord,
+    query: &str,
+    now: chrono::DateTime<Utc>,
+) -> f64 {
     let q = query.to_ascii_lowercase();
     let text = mem.text_for_embedding().to_ascii_lowercase();
 
-    let has_ops_signal = ["api key", "self-host", "self hosted", "credential", "token", "deploy", "plane", "dns", "cron", "server"]
-        .iter()
-        .any(|k| text.contains(k) || q.contains(k))
+    let has_ops_signal = [
+        "api key",
+        "self-host",
+        "self hosted",
+        "credential",
+        "token",
+        "deploy",
+        "plane",
+        "dns",
+        "cron",
+        "server",
+    ]
+    .iter()
+    .any(|k| text.contains(k) || q.contains(k))
         || mem.tags.iter().any(|t| {
             let t = t.to_ascii_lowercase();
-            ["ops", "operational", "infra", "infrastructure", "credentials", "deployment", "status"].contains(&t.as_str())
+            [
+                "ops",
+                "operational",
+                "infra",
+                "infrastructure",
+                "credentials",
+                "deployment",
+                "status",
+            ]
+            .contains(&t.as_str())
         });
 
     match &mem.kind {
         MemoryKind::Fact(_) if has_ops_signal => {
             let age_days = (now - mem.created_at).num_seconds().max(0) as f64 / 86_400.0;
-            if age_days <= 90.0 { 1.35 } else { 1.15 }
+            if age_days <= 90.0 {
+                1.35
+            } else {
+                1.15
+            }
         }
-        MemoryKind::Action(_) => 1.10,
+        MemoryKind::Action(_) | MemoryKind::Intent(_) => 1.10,
         _ => 1.0,
     }
 }
@@ -1090,7 +1124,10 @@ mod tests {
             assert!((0.0..=1.0).contains(&r.explain.rrf_rank_percentile));
             assert!(r.explain.bm25_rank.is_some() || r.explain.vector_rank.is_some());
             assert!(r.explain.matched_modalities <= 2);
-            assert_eq!(r.explain.modality_agreement, r.explain.matched_modalities == 2);
+            assert_eq!(
+                r.explain.modality_agreement,
+                r.explain.matched_modalities == 2
+            );
         }
     }
 

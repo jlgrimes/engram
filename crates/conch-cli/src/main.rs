@@ -78,6 +78,20 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Store an intent (free-text future plan or intention)
+    RememberIntent {
+        text: String,
+        #[arg(long)]
+        tags: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
     /// Semantic search for memories
     Recall {
         query: String,
@@ -359,14 +373,56 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
                 let val_cfg = ValidationConfig::default();
                 let val_result = ValidationEngine::validate(text, &val_cfg);
                 if !val_result.passed && !cli.quiet {
-                    eprintln!("⚠ Validation warning: {} violation(s) detected:", val_result.violations.len());
+                    eprintln!(
+                        "⚠ Validation warning: {} violation(s) detected:",
+                        val_result.violations.len()
+                    );
                 }
             }
-            let mem = db.remember_action_full(text, &tag_list, src, session_id.as_deref(), channel.as_deref())?;
+            let mem = db.remember_action_full(
+                text,
+                &tag_list,
+                src,
+                session_id.as_deref(),
+                channel.as_deref(),
+            )?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&mem)?);
             } else if !cli.quiet {
                 println!("Remembered action: {text}");
+            }
+        }
+        Command::RememberIntent {
+            text,
+            tags,
+            source,
+            session_id,
+            channel,
+            force,
+        } => {
+            let tag_list = parse_tags(tags.as_deref());
+            let src = Some(source.as_deref().unwrap_or("cli"));
+            if !force {
+                let val_cfg = ValidationConfig::default();
+                let val_result = ValidationEngine::validate(text, &val_cfg);
+                if !val_result.passed && !cli.quiet {
+                    eprintln!(
+                        "⚠ Validation warning: {} violation(s) detected:",
+                        val_result.violations.len()
+                    );
+                }
+            }
+            let mem = db.remember_intent_full(
+                text,
+                &tag_list,
+                src,
+                session_id.as_deref(),
+                channel.as_deref(),
+            )?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&mem)?);
+            } else if !cli.quiet {
+                println!("Remembered intent: {text}");
             }
         }
         Command::Recall { query, limit, tag } => {
@@ -408,6 +464,10 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
                         MemoryKind::Action(a) => println!(
                             "[action] {} (str: {:.2}, score: {:.3}, {}){tag_suffix}",
                             a.text, r.memory.strength, r.score, rank_line
+                        ),
+                        MemoryKind::Intent(i) => println!(
+                            "[intent] {} (str: {:.2}, score: {:.3}, {}){tag_suffix}",
+                            i.text, r.memory.strength, r.score, rank_line
                         ),
                     }
                 }
@@ -475,6 +535,10 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
                                 "[action/{source_label}] {} (str: {:.2}, score: {:.3}){tag_suffix}",
                                 a.text, r.recall.memory.strength, r.recall.score
                             ),
+                            MemoryKind::Intent(i) => println!(
+                                "[intent/{source_label}] {} (str: {:.2}, score: {:.3}){tag_suffix}",
+                                i.text, r.recall.memory.strength, r.recall.score
+                            ),
                         }
                     }
                 }
@@ -526,8 +590,12 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
             } else if !cli.quiet {
                 println!("Namespace: {}", cli.namespace);
                 println!(
-                    "Memories: {} ({} facts, {} episodes, {} actions)",
-                    stats.total_memories, stats.total_facts, stats.total_episodes, stats.total_actions
+                    "Memories: {} ({} facts, {} episodes, {} actions, {} intents)",
+                    stats.total_memories,
+                    stats.total_facts,
+                    stats.total_episodes,
+                    stats.total_actions,
+                    stats.total_intents
                 );
                 println!("Avg strength: {:.3}", stats.avg_strength);
                 println!(
@@ -616,6 +684,12 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
                                     node.depth, a.text, node.connected_via, node.memory.strength
                                 );
                             }
+                            MemoryKind::Intent(i) => {
+                                println!(
+                                    "{indent}[hop {}] {} (via: {}, str: {:.2})",
+                                    node.depth, i.text, node.connected_via, node.memory.strength
+                                );
+                            }
                         }
                     }
                 }
@@ -633,6 +707,7 @@ fn run(cli: &Cli, db: &ConchDB) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         MemoryKind::Episode(e) => format!("episode: {}", e.text),
                         MemoryKind::Action(a) => format!("action: {}", a.text),
+                        MemoryKind::Intent(i) => format!("intent: {}", i.text),
                     };
                     println!("Memory #{} — {kind_str}", mem.id);
                     println!("  Created:       {}", info.created_at);

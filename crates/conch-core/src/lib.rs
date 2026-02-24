@@ -20,9 +20,10 @@ pub use isomorphic::{
     DEFAULT_MYCELIUM_URL,
 };
 pub use memory::{
-    Action, AuditEntry, AuditIntegrityResult, CorruptedMemory, Episode, ExportData, Fact, GraphNode,
-    MemoryKind, MemoryRecord, MemoryStats, OperationWriteRetryStats, ProvenanceInfo,
-    RememberResult, TamperedAuditEntry, TemporalMetadata, VerifyResult, WriteRetryStats,
+    Action, AuditEntry, AuditIntegrityResult, CorruptedMemory, Episode, ExportData, Fact,
+    GraphNode, Intent, MemoryKind, MemoryRecord, MemoryStats, OperationWriteRetryStats,
+    ProvenanceInfo, RememberResult, TamperedAuditEntry, TemporalMetadata, VerifyResult,
+    WriteRetryStats,
 };
 pub use recall::{
     recall, recall_with_tag_filter, RecallError, RecallResult, RecallScoreCoefficients,
@@ -273,6 +274,39 @@ impl ConchDB {
     ) -> Result<MemoryRecord, ConchError> {
         let embedding = self.embedder.embed_one(text)?;
         let id = self.store.remember_action_ns(
+            text,
+            Some(&embedding),
+            tags,
+            source,
+            session_id,
+            channel,
+            &self.namespace,
+        )?;
+        Ok(self.store.get_memory(id)?.expect("just inserted"))
+    }
+
+    pub fn remember_intent(&self, text: &str) -> Result<MemoryRecord, ConchError> {
+        self.remember_intent_with_tags(text, &[])
+    }
+
+    pub fn remember_intent_with_tags(
+        &self,
+        text: &str,
+        tags: &[String],
+    ) -> Result<MemoryRecord, ConchError> {
+        self.remember_intent_full(text, tags, None, None, None)
+    }
+
+    pub fn remember_intent_full(
+        &self,
+        text: &str,
+        tags: &[String],
+        source: Option<&str>,
+        session_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<MemoryRecord, ConchError> {
+        let embedding = self.embedder.embed_one(text)?;
+        let id = self.store.remember_intent_ns(
             text,
             Some(&embedding),
             tags,
@@ -763,6 +797,21 @@ impl ConchDB {
                 MemoryKind::Action(a) => {
                     self.store.import_action_ns(
                         &a.text,
+                        mem.strength,
+                        mem.embedding.as_deref(),
+                        &created,
+                        &accessed,
+                        mem.access_count,
+                        &mem.tags,
+                        mem.source.as_deref(),
+                        mem.session_id.as_deref(),
+                        mem.channel.as_deref(),
+                        &self.namespace,
+                    )?;
+                }
+                MemoryKind::Intent(i) => {
+                    self.store.import_intent_ns(
+                        &i.text,
                         mem.strength,
                         mem.embedding.as_deref(),
                         &created,

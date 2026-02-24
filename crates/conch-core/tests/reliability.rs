@@ -771,9 +771,7 @@ fn operational_fact_recall_finds_durable_fact_in_fresh_query() {
     db.remember_episode("Random standup note about lunch")
         .unwrap();
 
-    let results = db
-        .recall("plane self hosted api key", 5)
-        .unwrap();
+    let results = db.recall("plane self hosted api key", 5).unwrap();
 
     let found = results.iter().any(|r| {
         matches!(&r.memory.kind, MemoryKind::Fact(f)
@@ -781,7 +779,10 @@ fn operational_fact_recall_finds_durable_fact_in_fresh_query() {
             && f.object.to_ascii_lowercase().contains("api key"))
     });
 
-    assert!(found, "durable operational fact must be recalled in a fresh query");
+    assert!(
+        found,
+        "durable operational fact must be recalled in a fresh query"
+    );
 }
 
 #[test]
@@ -795,5 +796,45 @@ fn action_memories_are_stored_and_recalled_as_first_class_kind() {
     assert!(matches!(action.kind, MemoryKind::Action(_)));
 
     let recalled = db.recall("deployed plane prod restart service", 3).unwrap();
-    assert!(recalled.iter().any(|r| matches!(r.memory.kind, MemoryKind::Action(_))));
+    assert!(recalled
+        .iter()
+        .any(|r| matches!(r.memory.kind, MemoryKind::Action(_))));
+}
+
+#[test]
+fn intent_memories_store_recall_and_export_import_roundtrip() {
+    let source = ConchDB::open_in_memory_with(Box::new(IdenticalEmbedder)).unwrap();
+
+    let intent = source
+        .remember_intent_full(
+            "Plan to rotate API keys this Friday",
+            &["ops".to_string(), "plan".to_string()],
+            Some("cli"),
+            Some("sess-intent"),
+            Some("#infra"),
+        )
+        .unwrap();
+
+    assert!(matches!(intent.kind, MemoryKind::Intent(_)));
+
+    let recalled = source.recall("rotate api keys friday", 5).unwrap();
+    assert!(recalled
+        .iter()
+        .any(|r| matches!(r.memory.kind, MemoryKind::Intent(_))));
+
+    let export = source.export().unwrap();
+    assert!(export
+        .memories
+        .iter()
+        .any(|m| matches!(m.kind, MemoryKind::Intent(_))));
+
+    let dest = ConchDB::open_in_memory_with(Box::new(IdenticalEmbedder)).unwrap();
+    let imported = dest.import(&export).unwrap();
+    assert_eq!(imported, export.memories.len());
+    assert!(dest
+        .store()
+        .all_memories()
+        .unwrap()
+        .iter()
+        .any(|m| matches!(m.kind, MemoryKind::Intent(_))));
 }

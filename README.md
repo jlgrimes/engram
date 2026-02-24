@@ -55,6 +55,9 @@ conch remember-episode "Deployed v2.0 to production"
 # Store an action (executed operation)
 conch remember-action "Edited Caddyfile and restarted caddy"
 
+# Store an intent (future plan)
+conch remember-intent "Plan to rotate API keys this Friday"
+
 # Recall by meaning (not keyword)
 conch recall "where does Jared work?"
 # → [fact] Jared works at Microsoft (score: 0.847)
@@ -74,7 +77,7 @@ Store → Embed → Search → Decay → Reinforce
 
 1. **Store** — facts (subject-relation-object) or episodes (free text). Embedding generated locally via FastEmbed.
 2. **Search** — hybrid BM25 + vector recall, fused via Reciprocal Rank Fusion (RRF), weighted by decayed strength.
-3. **Decay** — strength diminishes over time. Facts decay slowly (λ=0.02/day), episodes faster (λ=0.06/day), actions fastest (λ=0.09/day).
+3. **Decay** — strength diminishes over time. Facts decay slowly (λ=0.02/day), episodes faster (λ=0.06/day), actions/intents fastest (λ=0.09/day).
 4. **Reinforce** — recalled memories get a boost. Frequently accessed ones survive longer.
 5. **Death** — memories below strength 0.01 are pruned during decay passes.
 
@@ -117,6 +120,7 @@ score = RRF(BM25_rank, vector_rank) × recency_boost × access_weight × effecti
 conch remember <subject> <relation> <object>   # store a fact
 conch remember-episode <text>                   # store an event
 conch remember-action <text>                    # store an executed action
+conch remember-intent <text>                    # store a future intent/plan
 conch recall <query> [--limit N] [--tag T]     # semantic search
 conch forget --id <id>                          # delete by ID
 conch forget --subject <name>                   # delete by subject
@@ -171,7 +175,7 @@ let stats = db.decay()?;
 }
 ```
 
-**MCP tools**: `remember_fact`, `remember_episode`, `remember_action`, `recall`, `forget`, `decay`, `stats`
+**MCP tools**: `remember_fact`, `remember_episode`, `remember_action`, `remember_intent`, `recall`, `forget`, `decay`, `stats`
 
 ## OpenClaw Integration (One-Click)
 

@@ -49,7 +49,15 @@ pub fn run_decay_ns(
     )?;
 
     if deleted > 0 {
-        store.log_audit("decay_delete", None, "system", Some(&format!("{{\"deleted\":{deleted},\"namespace\":{}}}", serde_json::json!(namespace))))?;
+        store.log_audit(
+            "decay_delete",
+            None,
+            "system",
+            Some(&format!(
+                "{{\"deleted\":{deleted},\"namespace\":{}}}",
+                serde_json::json!(namespace)
+            )),
+        )?;
     }
 
     Ok(DecayResult { decayed, deleted })
@@ -102,8 +110,12 @@ mod tests {
     #[test]
     fn test_decay_respects_importance() {
         let store = MemoryStore::open_in_memory().unwrap();
-        let id_low = store.remember_fact("low", "importance", "mem", None).unwrap();
-        let id_high = store.remember_fact("high", "importance", "mem", None).unwrap();
+        let id_low = store
+            .remember_fact("low", "importance", "mem", None)
+            .unwrap();
+        let id_high = store
+            .remember_fact("high", "importance", "mem", None)
+            .unwrap();
 
         // Set importance: low=0.0, high=1.0
         store.update_importance(id_low, 0.0).unwrap();
@@ -128,7 +140,8 @@ mod tests {
         assert!(
             high.strength > low.strength,
             "high importance ({:.4}) should decay slower than low importance ({:.4})",
-            high.strength, low.strength
+            high.strength,
+            low.strength
         );
     }
 

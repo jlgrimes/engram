@@ -1,6 +1,6 @@
 # Conch Customer App
 
-Customer-facing web app for external users at `app.conch.lol`.
+Customer-facing web app for external users at `app.conch.so`.
 
 ## Run
 

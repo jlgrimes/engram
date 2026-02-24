@@ -1,4 +1,4 @@
-# Deploying `customer-app` to `app.conch.lol`
+# Deploying `customer-app` to `app.conch.so`
 
 This guide covers deployment and DNS routing from GoDaddy for the customer-facing app.
 
@@ -27,7 +27,7 @@ Use one option:
 2. Framework preset: `Next.js`.
 3. Build command: `npm run build`.
 4. Output: default Next.js output.
-5. Add custom domain `app.conch.lol` in Vercel project settings.
+5. Add custom domain `app.conch.so` in Vercel project settings.
 
 Expected GoDaddy DNS for Vercel:
 
@@ -41,7 +41,7 @@ Notes:
 
 ### Option B: Static host/VPS/Load Balancer
 
-Deploy app to your host and point `app.conch.lol` to a public IPv4 address.
+Deploy app to your host and point `app.conch.so` to a public IPv4 address.
 
 Expected GoDaddy DNS for A-record target:
 
@@ -61,28 +61,28 @@ Run these after saving DNS records (propagation may take several minutes):
 
 ```bash
 # Check authoritative resolution
-nslookup app.conch.lol
+nslookup app.conch.so
 
 # Query A record
-dig +short app.conch.lol A
+dig +short app.conch.so A
 
 # Query CNAME record
-dig +short app.conch.lol CNAME
+dig +short app.conch.so CNAME
 ```
 
 HTTP checks:
 
 ```bash
 # Header check
-curl -I https://app.conch.lol
+curl -I https://app.conch.so
 
 # Follow redirects and print final URL
-curl -sS -L -o /dev/null -w '%{url_effective}\n%{http_code}\n' https://app.conch.lol
+curl -sS -L -o /dev/null -w '%{url_effective}\n%{http_code}\n' https://app.conch.so
 ```
 
 Expected result:
 - DNS resolves to either the Vercel CNAME chain or your A/AAAA host.
-- `https://app.conch.lol` returns `200` (or expected `301/308` then `200`).
+- `https://app.conch.so` returns `200` (or expected `301/308` then `200`).
 
 ## 4) Operational Notes
 

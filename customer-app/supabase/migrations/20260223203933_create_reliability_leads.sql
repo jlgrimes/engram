@@ -6,7 +6,7 @@ create table if not exists public.reliability_leads (
   email text not null,
   team_size text,
   use_case text,
-  source text not null default 'app.conch.lol',
+  source text not null default 'app.conch.so',
   created_at timestamptz not null default now()
 );
 
